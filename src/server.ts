@@ -104,7 +104,7 @@ export function createApp(dataDir = resolve('data')) {
       if (!req.file) return void res.status(400).json({ error: 'ファイルを選んでください。' });
       let raw: unknown;
       if (/\.json$/i.test(req.file.originalname))
-        raw = JSON.parse(req.file.buffer.toString('utf8'));
+        raw = JSON.parse(req.file.buffer.toString('utf8').replace(/^\uFEFF/, ''));
       else {
         const title = z
           .string()

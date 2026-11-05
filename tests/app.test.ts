@@ -320,6 +320,22 @@ test('回答→採点→履歴、下書き、教材追加、秘密情報の保�
       ).status,
       409,
     );
+    const bomPackage = new FormData();
+    bomPackage.append(
+      'file',
+      new Blob(['\uFEFF' + JSON.stringify({ ...sample, id: 'sample-bom' })]),
+      'from-ai.json',
+    );
+    assert.equal(
+      (
+        await request('/materials', {
+          method: 'POST',
+          headers: { 'x-study-token': state.token },
+          body: bomPackage,
+        })
+      ).status,
+      201,
+    );
   } finally {
     await new Promise<void>((done) => server.close(() => done()));
     store.close();

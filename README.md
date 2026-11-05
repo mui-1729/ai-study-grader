@@ -73,6 +73,14 @@ PDFの図、画像だけのページ、数式のレイアウト、読み順は�
 
 ### 問題付き教材パッケージ
 
+他のAIへ元資料を渡して教材を作る場合は、[教材作成用プロンプト](docs/create-material-prompt.md) をそのまま使えます。[元資料から学習までの手順](docs/material-workflow.md) に、元資料をアプリへ入れる場合の扱いと、アプリ内自動作成との使い分けをまとめています。
+
+取り込み前に、ファイルを追加せず形式だけ確認することもできます。
+
+```powershell
+npm run validate:package -- "C:\path\to\course.json"
+```
+
 `examples/sample-course.json` と [教材パッケージ形式](docs/material-package.md) を参照してください。まとめ・問題・解答をこのチャットなどで作成し、同じ形式のJSONにすれば、ファイル選択1回で追加できます。同じIDの重複は上書きせず拒否します。別の教材・改訂版は別のIDで追加してください。
 
 コマンドからも追加できます。
