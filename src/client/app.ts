@@ -19,6 +19,7 @@ type View =
   | 'editor'
   | 'usage';
 let usageData: ReturnType<typeof usageSummary> | null = null;
+let materialPromptText = '';
 let courses: PublicCourse[] = [],
   history: Attempt[] = [],
   status = { aiConfigured: false, model: 'gpt-6-luna', token: '' };
@@ -160,8 +161,25 @@ function historyView() {
   const rows = history.filter((a) => filter !== 'review' || a.grade.score < a.grade.maxPoints);
   return `<div class="topline"><div><span class="eyebrow">LEARNING JOURNAL</span><h1>学習の記録</h1><p>間違えたところが、次に分かるところ。</p></div><button data-action="toggle-filter">${filter === 'review' ? 'すべて表示' : '要復習だけ'}</button></div><div class="paper">${rows.map((a) => `<div class="history-row"><div><strong>${esc(a.questionTitle)}</strong><small>${esc(a.courseTitle)} · ${new Date(a.createdAt).toLocaleString('ja-JP')}<br>${esc(modeName(a.grade.mode))}${a.grade.model ? ' · ' + esc(a.grade.model) : ''}</small></div><div class="history-score">${a.grade.score} / ${a.grade.maxPoints}</div><button data-attempt="${a.id}">振り返る →</button></div>`).join('') || '<div class="empty">まだ記録がありません。問題に取り組むと、ここに残ります。</div>'}</div>`;
 }
+function materialPromptPanel() {
+  return `<section class="paper form material-authoring" aria-labelledby="authoring-title">
+    <span class="eyebrow">STEP 1 · 教材を作る</span>
+    <h2 id="authoring-title">他のAIに渡すプロンプト</h2>
+    <p class="muted">このプロンプトと元資料を、教材作成を任せるAIに渡してください。教材・問題・解答・採点基準がそろったJSONを作成するための指示です。</p>
+    <div class="actions">
+      <button type="button" class="primary" data-action="copy-material-prompt">プロンプトをコピー</button>
+      <a class="button-link" href="/api/material-prompt/download" download>テキストをダウンロード</a>
+      <button type="button" data-action="show-material-prompt">全文を表示</button>
+    </div>
+    <div id="material-prompt-preview" hidden>
+      <label for="material-prompt-text">教材作成用プロンプト（編集不要で使えます）</label>
+      <textarea id="material-prompt-text" rows="12" readonly spellcheck="false"></textarea>
+    </div>
+    <p class="hint">受け取ったJSONと作成確認レポートを確認してから、下の欄でJSONを追加します。元資料を別に登録しても、採点時に自動で関連付けられる機能はありません。</p>
+  </section>`;
+}
 function importForm() {
-  return `<div class="topline"><div><span class="eyebrow">BUILD YOUR LIBRARY</span><h1>学びたい教材を追加する</h1><p>科目を問わず、使いたい教材を何度でも。</p></div></div><div class="paper form"><form id="import-form"><label for="material-title">教材の名前</label><input id="material-title" name="title" placeholder="例：統計学 第1回"><label for="material-file">教材ファイル</label><input id="material-file" name="file" type="file" accept=".pdf,.md,.txt,.json" required><p class="muted">PDF・Markdown・テキスト、または問題付き教材パッケージ（JSON）。1ファイル15MBまで。</p><p class="hint">本文だけのファイルは、まず読むための教材として追加します。問題・解答・採点基準は後から追加できます。こちらのチャットで作成した問題付きパッケージなら、そのまま学習・採点を始められます。</p><p class="hint">PDFは文字を取り出せるものに対応します。画像だけのPDF、図表や数式の配置は正確に読み取れない場合があるため、追加後に本文を確認してください。元ファイルは変更しません。</p><button class="primary" type="submit">この教材を追加する</button></form></div>`;
+  return `<div class="topline"><div><span class="eyebrow">BUILD YOUR LIBRARY</span><h1>学びたい教材を追加する</h1><p>科目を問わず、使いたい教材を何度でも。</p></div></div>${materialPromptPanel()}<div class="paper form"><span class="eyebrow">STEP 2 · 教材を取り込む</span><h2>完成した教材を追加する</h2><form id="import-form"><label for="material-title">教材の名前</label><input id="material-title" name="title" placeholder="例：統計学 第1回"><label for="material-file">教材ファイル</label><input id="material-file" name="file" type="file" accept=".pdf,.md,.txt,.json" required><p class="muted">PDF・Markdown・テキスト、または問題付き教材パッケージ（JSON）。1ファイル15MBまで。</p><p class="hint">問題付きのJSONなら、そのまま学習・採点を始められます。本文だけのファイルは、まず読むための教材として追加します。問題・解答・採点基準は後から追加できます。</p><p class="hint">PDFは文字を取り出せるものに対応します。画像だけのPDF、図表や数式の配置は正確に読み取れない場合があるため、追加後に本文を確認してください。元ファイルは変更しません。</p><button class="primary" type="submit">この教材を追加する</button></form></div>`;
 }
 function settings() {
   return `<div class="topline"><div><span class="eyebrow">AI CONNECTION</span><h1>INIAD AI-MOPの設定</h1><p>普段はLuna、必要なときにAstra。</p></div></div><div class="paper form"><span class="tag ${status.aiConfigured ? '' : 'warn'}">${status.aiConfigured ? '鍵を設定済み（接続は未確認）' : '未設定'}</span><form id="settings-form"><label for="api-key">AI-MOPのAPIキー</label><input id="api-key" type="password" autocomplete="off" placeholder="${status.aiConfigured ? '変更するときだけ入力' : 'ご自身のパソコンで入力してください'}" ${status.aiConfigured ? '' : 'required'}><small>入力した鍵は、このパソコンのアプリ専用フォルダーに保存します。画面への再表示やGitHubへの登録はしません。</small><label for="model-name">標準のモデル名</label><input id="model-name" list="model-options" value="${esc(status.model)}" required pattern="[a-zA-Z0-9._:/\-]+"><datalist id="model-options"><option value="gpt-6-luna"><option value="gpt-6-astra"></datalist><p><small>AI-MOPで利用できる正式な名前を指定します。Lunaを普段の採点に使い、必要な問題だけAstraを選べます。</small></p><div class="actions"><button type="submit" class="primary">設定を保存</button><button type="button" data-action="models" ${status.aiConfigured ? '' : 'disabled'}>利用できるモデルを確認</button></div><p id="model-result" class="hint" hidden></p></form><div class="settings-separator"><h3>利用枠を大切に使うために</h3><p class="muted">1問ずつ採点し、過去の会話全体は送りません。失敗した処理は自動で再送しません。残りの利用枠はAI-MOP側で確認してください。</p><small>このアプリは自分のパソコン専用です。共有・公開して使う機能は初期版には含まれません。</small></div></div>`;
@@ -386,6 +404,34 @@ function scheduleSave() {
   }, 700);
 }
 async function action(name: string) {
+  if (name === 'copy-material-prompt' || name === 'show-material-prompt') {
+    if (!materialPromptText)
+      materialPromptText = (await api<{ prompt: string }>('/material-prompt')).prompt;
+    if (name === 'copy-material-prompt') {
+      try {
+        await navigator.clipboard.writeText(materialPromptText);
+        notice(
+          'プロンプトをコピーしました。元資料と一緒に、教材作成を任せるAIへ貼り付けてください。',
+        );
+        return;
+      } catch {
+        notice(
+          '自動コピーできませんでした。表示した全文をCtrl+Cでコピーするか、ダウンロードしてください。',
+        );
+      }
+    }
+    const preview = document.querySelector<HTMLElement>('#material-prompt-preview');
+    const text = document.querySelector<HTMLTextAreaElement>('#material-prompt-text');
+    if (preview && text) {
+      preview.hidden = false;
+      text.value = materialPromptText;
+      if (name === 'copy-material-prompt') {
+        text.focus();
+        text.select();
+      }
+    }
+    return;
+  }
   if (name === 'toggle-filter') {
     filter = filter === 'review' ? 'all' : 'review';
     render();

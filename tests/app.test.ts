@@ -219,6 +219,17 @@ test('回答→採点→履歴、下書き、教材追加、秘密情報の保�
       aiConfigured: boolean;
     };
     assert.equal(state.aiConfigured, false);
+    const promptResponse = await request('/material-prompt');
+    assert.equal(promptResponse.status, 200);
+    const { prompt } = await promptResponse.json();
+    const expectedPrompt = readFileSync('docs/create-material-prompt.md', 'utf8')
+      .split('## プロンプト本文')[1]!
+      .trimStart();
+    assert.equal(prompt, expectedPrompt);
+    const promptDownload = await request('/material-prompt/download');
+    assert.match(promptDownload.headers.get('content-disposition')!, /attachment/);
+    assert.match(promptDownload.headers.get('content-type')!, /text\/plain/);
+    assert.equal(await promptDownload.text(), prompt);
     const post = (path: string, body: unknown, method = 'POST') =>
       request(path, {
         method,

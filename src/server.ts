@@ -1,7 +1,7 @@
 import express from 'express';
 import { spawn } from 'node:child_process';
 import { APICallError } from 'ai';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { randomBytes, createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
@@ -44,6 +44,17 @@ export function createApp(dataDir = resolve('data')) {
     next();
   });
   app.use(express.json({ limit: '3mb' }));
+  const materialPrompt = () => {
+    const document = readFileSync(resolve('docs/create-material-prompt.md'), 'utf8');
+    const marker = '## プロンプト本文';
+    const start = document.indexOf(marker);
+    if (start < 0) throw new Error('教材作成プロンプトを読み込めませんでした。');
+    return document.slice(start + marker.length).trimStart();
+  };
+  app.get('/api/material-prompt', (_req, res) => res.json({ prompt: materialPrompt() }));
+  app.get('/api/material-prompt/download', (_req, res) => {
+    res.type('text/plain').attachment('study-studio-material-prompt.txt').send(materialPrompt());
+  });
   app.get('/api/status', (_req, res) =>
     res.json({
       aiConfigured: Boolean(config.apiKey),
