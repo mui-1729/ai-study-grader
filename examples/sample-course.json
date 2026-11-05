@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "id": "sample-arithmetic",
+  "version": "1",
+  "title": "はじめての教材パッケージ",
+  "description": "教材の形式を確認するための、公開可能なサンプルです。",
+  "gradingPolicy": "同じ意味の表現や正しい別解も認め、理由に部分点を付ける。",
+  "chapters": [
+    {
+      "id": "ch-1",
+      "title": "偶数と足し算",
+      "content": "## 偶数とは\n\n整数kを使って2kと書ける整数を偶数といいます。\n\n偶数2aと2bの和は2(a+b)なので、偶数です。"
+    }
+  ],
+  "questions": [
+    {
+      "id": "q-1",
+      "chapterId": "ch-1",
+      "title": "足し算を確認",
+      "kind": "exact",
+      "prompt": "2+3の答えを、数字だけで書いてください。",
+      "maxPoints": 1,
+      "modelAnswer": "5です。",
+      "rubric": "5なら1点。数字だけの回答を求めます。",
+      "criteria": [{ "id": "answer", "description": "答えが5である", "maxPoints": 1 }],
+      "acceptedAnswers": ["5"],
+      "reviewChapterIds": ["ch-1"],
+      "section": "practice"
+    },
+    {
+      "id": "q-2",
+      "chapterId": "ch-1",
+      "title": "偶数の和を説明",
+      "kind": "written",
+      "prompt": "2つの偶数の和が偶数になる理由を説明してください。",
+      "maxPoints": 5,
+      "modelAnswer": "2つの偶数を整数a,bを使って2a,2bと表す。和は2(a+b)で、a+bは整数なので、和は偶数である。",
+      "rubric": "偶数を2a,2bと表す:2点。和を2(a+b)と整理する:2点。a+bが整数なので偶数と結論付ける:1点。正しい言葉による説明も同等に評価する。",
+      "criteria": [
+        { "id": "definition", "description": "2つの偶数を整数の2倍として表す", "maxPoints": 2 },
+        { "id": "sum", "description": "和も整数の2倍になることを示す", "maxPoints": 2 },
+        { "id": "conclusion", "description": "定義から偶数と結論付ける", "maxPoints": 1 }
+      ],
+      "acceptedAnswers": [],
+      "reviewChapterIds": ["ch-1"],
+      "section": "practice"
+    }
+  ]
+}

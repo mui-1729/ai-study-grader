@@ -1,0 +1,38 @@
+{
+  "name": "study-studio",
+  "version": "1.0.0",
+  "description": "教材を差し替えて使える学習・採点アプリ",
+  "private": true,
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "build": "tsc",
+    "check": "tsc --noEmit",
+    "start": "node --env-file-if-exists=.env dist/server.js",
+    "dev": "npm run build && node --env-file-if-exists=.env --watch dist/server.js",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "import:course": "node --import tsx scripts/import-course.ts",
+    "import:package": "node --import tsx scripts/import-package.ts",
+    "setup:ai": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup-ai.ps1"
+  },
+  "type": "module",
+  "dependencies": {
+    "@ai-sdk/openai": "^4.0.109",
+    "ai": "^7.0.163",
+    "dompurify": "^3.4.17",
+    "express": "^5.3.0",
+    "marked": "^18.1.3",
+    "multer": "^2.5.0",
+    "pdfjs-dist": "^6.5.438",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/multer": "^2.3.0",
+    "@types/node": "^26.6.6",
+    "prettier": "^3.9.10",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}
