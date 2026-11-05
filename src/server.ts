@@ -1,4 +1,5 @@
 import express from 'express';
+import { spawn } from 'node:child_process';
 import { APICallError } from 'ai';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { resolve, join } from 'node:path';
@@ -311,9 +312,22 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   const port = Number(process.env.PORT || 4317);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('PORTが不正です');
   const { app, store } = createApp();
-  const server = app.listen(port, '127.0.0.1', () =>
-    console.log(`Study Studio: http://127.0.0.1:${port}`),
-  );
+  const server = app.listen(port, '127.0.0.1', () => {
+    const url = `http://127.0.0.1:${port}`;
+    console.log(`Study Studio: ${url}`);
+    console.log('Stop: Ctrl+C');
+    if (process.argv.includes('--open')) {
+      const command =
+        process.platform === 'win32'
+          ? 'explorer.exe'
+          : process.platform === 'darwin'
+            ? 'open'
+            : 'xdg-open';
+      const browserProcess = spawn(command, [url], { stdio: 'ignore', windowsHide: true });
+      browserProcess.on('error', () => console.log(`Open this URL in your browser: ${url}`));
+      browserProcess.unref();
+    }
+  });
   process.on('SIGINT', () =>
     server.close(() => {
       store.close();

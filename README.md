@@ -24,6 +24,15 @@ npm run build
 npm start
 ```
 
+準備済みなら、PowerShellでアプリのフォルダーに移動して次を実行すると、通常使っているブラウザーで開きます。
+
+```powershell
+cd "C:\path\to\study-studio"
+npm run open
+```
+
+別の場所へ移した場合は `cd` のパスを変更してください。`npm run open` は変更を反映するためのビルドも実行します。終了はそのPowerShellで `Ctrl+C`。ブラウザーを自動で開かず起動する場合は `npm start`、ソース変更後は先に `npm run build` を実行します。
+
 ブラウザーで [Study Studio](http://127.0.0.1:4317) を開きます。停止は実行中の画面で `Ctrl+C`。開発時も編集後に `npm run build` を実行し、サーバーと画面を再読み込みします。
 
 最初の教材として、`examples/sample-course.json` を「教材を追加」から選べます。個人の教材はリポジトリに含めていません。

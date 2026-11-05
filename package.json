@@ -10,6 +10,7 @@
     "build": "tsc",
     "check": "tsc --noEmit",
     "start": "node --env-file-if-exists=.env dist/server.js",
+    "open": "npm run build && node --env-file-if-exists=.env dist/server.js --open",
     "dev": "npm run build && node --env-file-if-exists=.env --watch dist/server.js",
     "test": "node --import tsx --test tests/*.test.ts",
     "import:course": "node --import tsx scripts/import-course.ts",
