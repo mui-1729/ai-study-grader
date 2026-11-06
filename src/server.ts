@@ -19,8 +19,11 @@ import {
   persistCourse,
   folderMaterialCourse,
   FolderMaterialError,
+  materialPath,
 } from './materials.js';
 import { folderUpload, removeUpload } from './folder-upload.js';
+import { materialImports, ImportBusyError } from './material-imports.js';
+import { MaterialReadError, type OCRFactory } from './ocr.js';
 import { usageSummary } from './usage.js';
 import { acquireDataLock } from './runtime-lock.js';
 import { defaultCredentialVault, type CredentialVault } from './credentials.js';
@@ -35,7 +38,7 @@ import {
 } from './authoring.js';
 export function createApp(
   dataDir = resolve('data'),
-  options: { credentialVault?: CredentialVault } = {},
+  options: { credentialVault?: CredentialVault; ocrFactory?: OCRFactory } = {},
 ) {
   mkdirSync(dataDir, { recursive: true });
   const coursesDir = join(dataDir, 'courses');
@@ -44,6 +47,7 @@ export function createApp(
   const vault = options.credentialVault ?? defaultCredentialVault(dataDir);
   let config = loadConfig(dataDir, vault);
   let busy = false;
+  const imports = materialImports(coursesDir, courses, options.ocrFactory);
   // A restart must never silently re-send a paid request.
   for (const job of store.generations<GenerationJob>()) {
     if (job.state === 'running') {
@@ -89,7 +93,7 @@ export function createApp(
   app.get('/api/status', (_req, res) =>
     res.json({
       aiConfigured: Boolean(config.apiKey),
-      appVersion: '2026.11.06.4',
+      appVersion: '2026.11.06.5',
       credentialStorage: config.credentialStorage,
       provider: 'INIAD AI-MOP',
       model: config.model,
@@ -150,6 +154,63 @@ export function createApp(
   const upload = multer({
     storage: multer.memoryStorage(),
     limits: { fileSize: MATERIAL_LIMITS.fileBytes, files: 1 },
+  });
+  app.get('/api/material-import/:id', (req, res) => {
+    const job = imports.get(req.params.id);
+    if (!job)
+      return void res
+        .status(404)
+        .json({
+          error:
+            '取り込みの状態が見つかりません。アプリを起動し直した場合はマイ教材を確認してください。自動で再送はしません。',
+        });
+    res.json(job);
+  });
+  app.post('/api/material-import/:id/cancel', (req, res) => {
+    imports.cancel(req.params.id);
+    res.json({ saved: true });
+  });
+  app.post('/api/material-import', folderUpload(join(dataDir, 'uploads')), async (req, res) => {
+    let transferred = false;
+    try {
+      const body = z
+        .object({
+          title: z.string().trim().min(1).max(160),
+          paths: z
+            .string()
+            .transform((value) =>
+              z
+                .array(z.string().min(1).max(512))
+                .min(1)
+                .max(MATERIAL_LIMITS.folderFiles)
+                .parse(JSON.parse(value)),
+            ),
+          ocrMode: z.enum(['auto', 'always', 'off']).default('auto'),
+        })
+        .strict()
+        .parse(req.body);
+      const files = req.files as Express.Multer.File[] | undefined;
+      if (!files?.length || files.length !== body.paths.length)
+        throw new FolderMaterialError('選択した資料の一覧を確認してください。');
+      const job = imports.start(
+        body.title,
+        files.map((upload, i) => ({ path: materialPath(body.paths[i]!), upload })),
+        body.ocrMode,
+      );
+      transferred = true;
+      res.status(202).json(job);
+    } catch (error) {
+      if (error instanceof ImportBusyError)
+        return void res
+          .status(429)
+          .json({ error: '別の資料を取り込み中です。完了後に追加してください。' });
+      throw error;
+    } finally {
+      if (!transferred)
+        await Promise.allSettled(
+          ((req.files as Express.Multer.File[] | undefined) ?? []).map(removeUpload),
+        );
+    }
   });
   app.post('/api/materials', upload.single('file'), async (req, res, next) => {
     try {
@@ -630,7 +691,7 @@ export function createApp(
       ];
       res.status(400).json({
         error:
-          error instanceof FolderMaterialError
+          error instanceof FolderMaterialError || error instanceof MaterialReadError
             ? error.message
             : error instanceof Error && error.message === 'folder_total_size'
               ? '資料の合計は500MB以下にしてください。まだ教材は追加していません。'

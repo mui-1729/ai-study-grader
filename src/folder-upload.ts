@@ -79,9 +79,9 @@ export function folderUpload(
     limits: {
       fileSize: MATERIAL_LIMITS.fileBytes,
       files: MATERIAL_LIMITS.folderFiles,
-      fields: 2,
+      fields: 3,
       fieldSize: 512 * 1024,
-      parts: MATERIAL_LIMITS.folderFiles + 3,
+      parts: MATERIAL_LIMITS.folderFiles + 4,
     },
   }).array('files', MATERIAL_LIMITS.folderFiles);
 }

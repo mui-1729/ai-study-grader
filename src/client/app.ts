@@ -1,3 +1,4 @@
+import type { MaterialImport } from '../material-imports.js';
 import { MATERIAL_LIMITS } from '../material-limits.js';
 // Browser modules are served locally; no CDN or external requests.
 // @ts-ignore Browser import path
@@ -25,7 +26,8 @@ type View =
   | 'editor'
   | 'usage'
   | 'tutor'
-  | 'generation';
+  | 'generation'
+  | 'material-import';
 type GenerationSummary = Omit<GenerationJob, 'selected'> & {
   plannedCalls: number;
   draft?: Course | null;
@@ -44,6 +46,8 @@ let generationPlan: GenerationPlan | null = null,
 let generationPoll: number | undefined;
 let folderFiles: { file: File; path: string; selected: boolean }[] = [];
 let folderSkipped = 0;
+let materialImport: MaterialImport | null = null;
+let materialImportTimer: number | undefined;
 let usageData: ReturnType<typeof usageSummary> | null = null;
 let materialPromptText = '';
 let gradingError = '';
@@ -137,6 +141,15 @@ function render() {
       document.querySelector('label[for="answer"]')?.insertAdjacentElement('beforebegin', section);
     }
   }
+  if (materialImport && view !== 'material-import') {
+    const button = document.createElement('button');
+    button.dataset.view = 'material-import';
+    button.textContent =
+      materialImport.state === 'running' || materialImport.state === 'cancelling'
+        ? '資料の読み取り状況'
+        : '前回の資料取り込み';
+    document.querySelector('aside')?.append(button);
+  }
   if (view === 'study') {
     const button = document.createElement('button');
     button.textContent = 'この資料からAI教材を作る';
@@ -195,6 +208,7 @@ function render() {
   bind();
 }
 function body(): string {
+  if (view === 'material-import') return materialImportView();
   if (view === 'tutor') return tutorView();
   if (view === 'generation') return generationView();
   if (view === 'usage') return usageView();
@@ -275,7 +289,7 @@ function generationView() {
     cancelled: '停止済み',
     interrupted: 'アプリ終了により中断',
   };
-  return `<button class="flat back" data-view="study">← 元資料に戻る</button><h1>元資料から教材を作る</h1><div class="paper form"><h2>${esc(current().title)}</h2><p>本文 ${plan.totalCharacters.toLocaleString()}文字・全${plan.totalUnits}区間。1区間につきAIを1回呼び出し、解説・確認問題・参考解答・採点基準を作ります。</p><p class="hint">利用枠の正確な残量は自動取得できません。まず少ない回数で確認してください。上限に達すると停止し、成功した区間を残します。画像・図表を読み直す機能はなく、取り込んだ本文だけを使います。</p><form id="generation-form"><label for="generation-start">開始する区間</label><input id="generation-start" type="number" min="1" max="${plan.totalUnits}" value="1" required><label for="generation-calls">今回生成する区間数（開始区間から順番）</label><input id="generation-calls" type="number" min="1" max="${Math.min(20, plan.totalUnits)}" value="${Math.min(3, plan.totalUnits)}" required><p id="generation-scope" class="hint"></p>${modelPicker('generation-model')}<p class="hint">「教材を生成」を押すと、選択した範囲の本文をINIAD AI-MOPへ送信します。1回の出力上限は6,144トークン。これは消費量の予測やquotaの保証ではありません。元資料はそのまま残ります。</p><button class="primary" type="submit" ${job?.state === 'running' || !status.aiConfigured ? 'disabled' : ''}>教材を生成</button>${!status.aiConfigured ? '<button type="button" data-view="settings">AIの設定を開く</button>' : ''}</form></div>${
+  return `<button class="flat back" data-view="study">← 元資料に戻る</button><h1>元資料から教材を作る</h1><div class="paper form"><h2>${esc(current().title)}</h2><p>本文 ${plan.totalCharacters.toLocaleString()}文字・全${plan.totalUnits}区間。1区間につきAIを1回呼び出し、解説・確認問題・参考解答・採点基準を作ります。</p><p class="hint">利用枠の正確な残量は自動取得できません。まず少ない回数で確認してください。上限に達すると停止し、成功した区間を残します。画像PDFは取り込み時にOCRで文字を読み取ります。教材作成にはその本文を使い、図の意味を画像から解析する処理は行いません。</p><form id="generation-form"><label for="generation-start">開始する区間</label><input id="generation-start" type="number" min="1" max="${plan.totalUnits}" value="1" required><label for="generation-calls">今回生成する区間数（開始区間から順番）</label><input id="generation-calls" type="number" min="1" max="${Math.min(20, plan.totalUnits)}" value="${Math.min(3, plan.totalUnits)}" required><p id="generation-scope" class="hint"></p>${modelPicker('generation-model')}<p class="hint">「教材を生成」を押すと、選択した範囲の本文をINIAD AI-MOPへ送信します。1回の出力上限は6,144トークン。これは消費量の予測やquotaの保証ではありません。元資料はそのまま残ります。</p><button class="primary" type="submit" ${job?.state === 'running' || !status.aiConfigured ? 'disabled' : ''}>教材を生成</button>${!status.aiConfigured ? '<button type="button" data-view="settings">AIの設定を開く</button>' : ''}</form></div>${
     job
       ? `<section class="paper" aria-live="polite"><h2>${stateName[job.state]} · ${job.completed.length}/${job.plannedCalls}回</h2><p>この結果では元資料の${(job.startUnit ?? 0) + 1}区間目から ${job.completed.length}/${job.totalUnits}区間を教材化しています。${job.completed.length < job.totalUnits ? '未生成の範囲があります。' : ''}</p>${job.error ? `<p role="alert" class="hint warn">${esc(job.error)}</p>` : ''}${job.state === 'running' ? `<p>画面を閉じてもアプリが動いていれば処理は続きます。</p><button data-action="generation-cancel" ${job.cancelRequested ? 'disabled' : ''}>${job.cancelRequested ? '停止を待っています' : '次の呼び出しから停止'}</button>` : ''}${
           job.draft
@@ -376,8 +390,52 @@ function materialPromptPanel() {
     <p class="hint">受け取ったJSONと作成確認レポートを確認してから、下の欄でJSONを追加します。元資料を別に登録しても、採点時に自動で関連付けられる機能はありません。</p>
   </section>`;
 }
+function ocrPicker(id: string) {
+  return `<label for="${id}">PDFの文字の読み取り</label><select id="${id}"><option value="auto">自動（画像ページをOCR）</option><option value="always">全ページをOCR（自動で読み落とす場合）</option><option value="off">OCRを使わず、埋め込み文字だけ</option></select><p class="hint">OCRは日本語・英語に対応し、このPC内で処理します。APIキーやAI-MOPの利用枠は使いません。ページ数によって時間がかかります。JSON・テキストには適用しません。</p>`;
+}
+function materialImportView() {
+  if (!materialImport) return '<p>教材を追加する画面から資料を選んでください。</p>';
+  const job = materialImport;
+  const stateName = {
+    running: '資料を読み取っています',
+    cancelling: '停止しています',
+    cancelled: '取り込みを停止しました',
+    completed: '取り込みが完了しました',
+    failed: '取り込めませんでした',
+  };
+  const phaseName = { text: '本文を確認', rendering: 'PDFページを画像化', ocr: 'OCRで文字を認識' };
+  return `<h1>${stateName[job.state]}</h1><div class="paper"><h2>${esc(job.title)}</h2><p>${esc(job.file)} · ${job.fileIndex}/${job.fileCount}ファイル</p>${job.page ? `<p>${job.page}/${job.pages}ページ · ${phaseName[job.phase]}${job.phase === 'ocr' ? ` ${Math.round(job.progress * 100)}%` : ''}</p>` : ''}<p>OCRで読み取ったページ：${job.ocrPages}</p>${job.state === 'running' || job.state === 'cancelling' ? `<p class="hint">このPC内で処理しています。画面を移ってもアプリが動いていれば読み取りは続きます。アプリを終了すると中断し、自動で再開しません。</p><button data-action="cancel-material-import" ${job.state === 'cancelling' ? 'disabled' : ''}>取り込みを停止</button>` : ''}${job.error ? `<p class="hint warn" role="alert">${esc(job.error)}</p>` : ''}${job.warnings.length ? `<details open><summary>元資料との照合が必要なページ（最大100件）</summary><ul>${job.warnings.map((w) => `<li>${esc(w)}</li>`).join('')}</ul></details>` : ''}${job.courseId ? `<p class="hint">OCRには誤読が含まれることがあります。特に数式・図表・記号を確認してから教材を作成してください。</p><button class="primary" data-action="open-imported-course">取り込んだ本文を確認する</button>` : ''}<button data-view="import">教材の追加に戻る</button></div>`;
+}
+async function startMaterialImport(data: FormData) {
+  materialImport = await api<MaterialImport>('/material-import', { method: 'POST', body: data });
+  sessionStorage.setItem('study-material-import', materialImport.id);
+  view = 'material-import';
+  render();
+  window.scrollTo(0, 0);
+  await pollMaterialImport();
+}
+async function pollMaterialImport() {
+  if (!materialImport) return;
+  clearTimeout(materialImportTimer);
+  try {
+    materialImport = await api<MaterialImport>(`/material-import/${materialImport.id}`);
+    if (materialImport.state === 'completed') await reload();
+    if (view === 'material-import') render();
+    if (materialImport.state === 'running' || materialImport.state === 'cancelling')
+      materialImportTimer = window.setTimeout(() => {
+        void pollMaterialImport();
+      }, 1000);
+  } catch (error) {
+    materialImport.state = 'failed';
+    materialImport.error =
+      error instanceof Error
+        ? error.message
+        : '取り込み状態を確認できません。マイ教材を確認してください。';
+    if (view === 'material-import') render();
+  }
+}
 function folderImportPanel() {
-  return `<section class="paper form"><h2>フォルダーからまとめて追加</h2><p>サブフォルダーも含め、PDF・Markdown・テキストを1つの教材にまとめます。</p><form id="folder-import-form"><label for="material-folder">資料のフォルダー</label><input id="material-folder" type="file" webkitdirectory multiple><label for="folder-title">まとめる教材の名前</label><input id="folder-title" maxlength="160" required placeholder="例：情報数学 第1〜6回"><div id="folder-preview"></div><p class="hint">一度に最大200ファイル・合計500MB・本文合計5,000,000文字。1ファイル50MBまで。JSON教材は下のファイル欄で別に追加してください。選択した資料だけをこのPCのアプリへ取り込み、この段階ではAIへ送りません。</p><p id="folder-error" class="hint warn" role="alert" hidden></p><button type="submit" class="primary" id="folder-submit" disabled>選択した資料をまとめて追加</button></form><p class="hint">追加後に「この資料からAI教材を作る」でまとめて教材化できます。PDFの図表や画像は本文へ正しく反映されない場合があるため、取り込んだ内容を確認してください。</p></section>`;
+  return `<section class="paper form"><h2>フォルダーからまとめて追加</h2><p>サブフォルダーも含め、PDF・Markdown・テキストを1つの教材にまとめます。</p><form id="folder-import-form"><label for="material-folder">資料のフォルダー</label><input id="material-folder" type="file" webkitdirectory multiple><label for="folder-title">まとめる教材の名前</label><input id="folder-title" maxlength="160" required placeholder="例：情報数学 第1〜6回"><div id="folder-preview"></div>${ocrPicker('folder-ocr')}<p class="hint">一度に最大200ファイル・合計500MB・本文合計5,000,000文字。1ファイル50MBまで。JSON教材は下のファイル欄で別に追加してください。選択した資料だけをこのPCのアプリへ取り込み、この段階ではAIへ送りません。</p><p id="folder-error" class="hint warn" role="alert" hidden></p><button type="submit" class="primary" id="folder-submit" disabled>選択した資料をまとめて追加</button></form><p class="hint">追加後に「この資料からAI教材を作る」でまとめて教材化できます。画像PDFはOCRで読み取ります。図表・数式・手書きは元資料と照合してください。</p></section>`;
 }
 function folderSelectionSummary() {
   const selected = folderFiles.filter((f) => f.selected),
@@ -477,22 +535,10 @@ function bindFolderImport() {
       button.textContent = '資料の本文を確認しています…';
       error.hidden = true;
       try {
-        const imported = await api<{ id: string; files: number }>('/materials/folder', {
-          method: 'POST',
-          body: data,
-        });
-        await reload();
-        courseId = imported.id;
-        chapterId = current().chapters[0]!.id;
-        tab = 'read';
-        view = 'study';
+        data.append('ocrMode', document.querySelector<HTMLSelectElement>('#folder-ocr')!.value);
+        await startMaterialImport(data);
         folderFiles = [];
         folderSkipped = 0;
-        render();
-        window.scrollTo(0, 0);
-        notice(
-          `${imported.files}資料を1つの教材にまとめました。本文を確認してからAI教材を作れます。`,
-        );
       } catch (err) {
         error.hidden = false;
         error.textContent =
@@ -512,7 +558,7 @@ function bindFolderImport() {
   };
 }
 function importForm() {
-  return `<div class="topline"><div><span class="eyebrow">BUILD YOUR LIBRARY</span><h1>学びたい教材を追加する</h1><p>科目を問わず、使いたい教材を何度でも。</p></div></div>${folderImportPanel()}${materialPromptPanel()}<div class="paper form"><span class="eyebrow">STEP 2 · 教材を取り込む</span><h2>元資料・完成した教材を追加する</h2><form id="import-form"><label for="material-title">教材の名前</label><input id="material-title" name="title" placeholder="例：統計学 第1回"><label for="material-file">教材ファイル</label><input id="material-file" name="file" type="file" accept=".pdf,.md,.txt,.json" required><p class="muted">PDF・Markdown・テキスト、または問題付き教材パッケージ（JSON）。1ファイル50MBまで。</p><p class="hint">問題付きのJSONなら、そのまま学習・採点を始められます。本文だけのファイルは、まず読むための教材として追加します。追加後に「この資料からAI教材を作る」で、解説・問題・解答・採点基準をまとめて生成できます。</p><p class="hint">PDFは文字を取り出せるものに対応します。画像だけのPDF、図表や数式の配置は正確に読み取れない場合があるため、追加後に本文を確認してください。元ファイルは変更しません。</p><button class="primary" type="submit">この教材を追加する</button></form></div>`;
+  return `<div class="topline"><div><span class="eyebrow">BUILD YOUR LIBRARY</span><h1>学びたい教材を追加する</h1><p>科目を問わず、使いたい教材を何度でも。</p></div></div>${folderImportPanel()}${materialPromptPanel()}<div class="paper form"><span class="eyebrow">STEP 2 · 教材を取り込む</span><h2>元資料・完成した教材を追加する</h2><form id="import-form"><label for="material-title">教材の名前</label><input id="material-title" name="title" placeholder="例：統計学 第1回"><label for="material-file">教材ファイル</label><input id="material-file" name="file" type="file" accept=".pdf,.md,.txt,.json" required><p class="muted">PDF・Markdown・テキスト、または問題付き教材パッケージ（JSON）。1ファイル50MBまで。</p><p class="hint">問題付きのJSONなら、そのまま学習・採点を始められます。本文だけのファイルは、まず読むための教材として追加します。追加後に「この資料からAI教材を作る」で、解説・問題・解答・採点基準をまとめて生成できます。</p><p class="hint">画像PDFは日本語・英語のOCRで文字を読み取ります。図表・数式・手書きは正確に読めない場合があるため、取り込んだ本文を確認してください。元ファイルは変更しません。</p>${ocrPicker('material-ocr')}<button class="primary" type="submit">この教材を追加する</button></form></div>`;
 }
 function settings() {
   return `<div class="topline"><div><span class="eyebrow">AI CONNECTION</span><h1>INIAD AI-MOPの設定</h1><p>普段はLuna、必要なときにAstra。</p></div></div><div class="paper form"><span class="tag ${status.aiConfigured ? '' : 'warn'}">${status.aiConfigured ? '鍵を設定済み（接続は未確認）' : '未設定'}</span><form id="settings-form"><label for="api-key">AI-MOPのAPIキー</label><input id="api-key" type="password" autocomplete="off" placeholder="${status.aiConfigured ? '変更するときだけ入力' : 'ご自身のパソコンで入力してください'}" ${status.aiConfigured ? '' : 'required'}><small>Windowsではユーザー単位で暗号化し、プロジェクト外に保存します。画面やGitHubへキーを出しません。</small><label for="model-name">標準のモデル名</label><input id="model-name" list="model-options" value="${esc(status.model)}" required pattern="[a-zA-Z0-9._:/\-]+"><datalist id="model-options"><option value="gpt-6-luna"><option value="gpt-6-astra"></datalist><p><small>AI-MOPで利用できる正式な名前を指定します。Lunaを普段の採点に使い、必要な問題だけAstraを選べます。</small></p><div class="actions"><button type="submit" class="primary">設定を保存</button><button type="button" data-action="models" ${status.aiConfigured ? '' : 'disabled'}>利用できるモデルを確認</button></div><p id="model-result" class="hint" hidden></p></form><div class="settings-separator"><h3>利用枠を大切に使うために</h3><p class="muted">1問ずつ採点し、過去の会話全体は送りません。失敗した処理は自動で再送しません。残りの利用枠はAI-MOP側で確認してください。</p><small>このアプリは自分のパソコン専用です。共有・公開して使う機能は初期版には含まれません。</small></div></div>`;
@@ -732,17 +778,34 @@ function bind() {
         button.disabled = true;
         button.textContent = '本文を確認しています…';
         try {
-          const data = await api<{ id: string }>('/materials', {
-            method: 'POST',
-            body: new FormData(imp),
-          });
-          await reload();
-          courseId = data.id;
-          chapterId = current().chapters[0]!.id;
-          tab = 'read';
-          view = 'study';
-          render();
-          notice('教材を追加しました。本文を確認してください。');
+          const form = new FormData(imp);
+          const file = form.get('file') as File;
+          if (!/\.json$/i.test(file.name)) {
+            const data = new FormData();
+            data.append(
+              'title',
+              String(form.get('title') || file.name.replace(/\.[^.]+$/, '')).trim(),
+            );
+            data.append('paths', JSON.stringify([file.name]));
+            data.append('files', file, file.name);
+            data.append(
+              'ocrMode',
+              document.querySelector<HTMLSelectElement>('#material-ocr')!.value,
+            );
+            await startMaterialImport(data);
+          } else {
+            const data = await api<{ id: string }>('/materials', {
+              method: 'POST',
+              body: new FormData(imp),
+            });
+            await reload();
+            courseId = data.id;
+            chapterId = current().chapters[0]!.id;
+            tab = 'read';
+            view = 'study';
+            render();
+            notice('教材を追加しました。本文を確認してください。');
+          }
         } finally {
           button.disabled = false;
           button.textContent = 'この教材を追加する';
@@ -821,6 +884,21 @@ function scheduleSave() {
   }, 700);
 }
 async function action(name: string) {
+  if (name === 'cancel-material-import' && materialImport) {
+    await api(`/material-import/${materialImport.id}/cancel`, { method: 'POST' });
+    await pollMaterialImport();
+    return;
+  }
+  if (name === 'open-imported-course' && materialImport?.courseId) {
+    await reload();
+    courseId = materialImport.courseId;
+    chapterId = current().chapters[0]!.id;
+    view = 'study';
+    tab = 'read';
+    render();
+    return;
+  }
+
   if (name === 'open-tutor' || name === 'tutor-new') {
     await startTutor(name === 'tutor-new');
     return;
@@ -1000,5 +1078,17 @@ void run(async () => {
   await reload();
   courseId = courses[0]?.id ?? '';
   chapterId = current()?.chapters[0]?.id ?? '';
+  const importId = sessionStorage.getItem('study-material-import');
+  if (importId) {
+    try {
+      materialImport = await api(`/material-import/${importId}`);
+      if (materialImport?.state === 'running' || materialImport?.state === 'cancelling') {
+        view = 'material-import';
+        await pollMaterialImport();
+      }
+    } catch {
+      sessionStorage.removeItem('study-material-import');
+    }
+  }
   render();
 });
