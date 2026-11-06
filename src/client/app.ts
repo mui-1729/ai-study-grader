@@ -41,6 +41,8 @@ let tutorSession: TutorSession | null = null,
 let generationPlan: GenerationPlan | null = null,
   generationJob: GenerationSummary | null = null;
 let generationPoll: number | undefined;
+let folderFiles: { file: File; path: string; selected: boolean }[] = [];
+let folderSkipped = 0;
 let usageData: ReturnType<typeof usageSummary> | null = null;
 let materialPromptText = '';
 let gradingError = '';
@@ -373,8 +375,140 @@ function materialPromptPanel() {
     <p class="hint">受け取ったJSONと作成確認レポートを確認してから、下の欄でJSONを追加します。元資料を別に登録しても、採点時に自動で関連付けられる機能はありません。</p>
   </section>`;
 }
+function folderImportPanel() {
+  return `<section class="paper form"><h2>フォルダーからまとめて追加</h2><p>サブフォルダーも含め、PDF・Markdown・テキストを1つの教材にまとめます。</p><form id="folder-import-form"><label for="material-folder">資料のフォルダー</label><input id="material-folder" type="file" webkitdirectory multiple><label for="folder-title">まとめる教材の名前</label><input id="folder-title" maxlength="160" required placeholder="例：情報数学 第1〜6回"><div id="folder-preview"></div><p class="hint">一度に最大50ファイル・合計100MB・本文合計500,000文字。1ファイル15MBまで。JSON教材は下のファイル欄で別に追加してください。選択した資料だけをこのPCのアプリへ取り込み、この段階ではAIへ送りません。</p><p id="folder-error" class="hint warn" role="alert" hidden></p><button type="submit" class="primary" id="folder-submit" disabled>選択した資料をまとめて追加</button></form><p class="hint">追加後に「この資料からAI教材を作る」でまとめて教材化できます。PDFの図表や画像は本文へ正しく反映されない場合があるため、取り込んだ内容を確認してください。</p></section>`;
+}
+function folderSelectionSummary() {
+  const selected = folderFiles.filter((f) => f.selected),
+    total = selected.reduce((sum, f) => sum + f.file.size, 0);
+  const valid = selected.length > 0 && selected.length <= 50 && total <= 100 * 1024 * 1024;
+  const summary = document.querySelector('#folder-summary');
+  if (summary)
+    summary.textContent = `${selected.length}/${folderFiles.length}ファイルを選択 · 合計${(total / 1024 / 1024).toFixed(1)}MB。${valid ? '一覧を確認して追加してください。' : '最大50ファイル・合計100MB以内になるよう選んでください。'}`;
+  const button = document.querySelector<HTMLButtonElement>('#folder-submit');
+  if (button) button.disabled = !valid;
+}
+function folderPreview() {
+  const target = document.querySelector('#folder-preview');
+  if (!target) return;
+  target.innerHTML = `<p id="folder-summary"></p>${folderSkipped ? `<p class="muted">対象外の${folderSkipped}ファイルは送信しません（JSON・画像・隠しフォルダーなど）。</p>` : ''}${folderFiles.length ? `<div class="actions"><button type="button" id="folder-select-all">すべて選択</button><button type="button" id="folder-select-none">すべて解除</button></div><div class="folder-file-list">${folderFiles.map((f, i) => `<label class="folder-file"><input type="checkbox" data-folder-file="${i}" ${f.selected ? 'checked' : ''} ${f.file.size > 15 * 1024 * 1024 ? 'disabled' : ''}><span>${esc(f.path)}<small>${(f.file.size / 1024 / 1024).toFixed(2)}MB${f.file.size > 15 * 1024 * 1024 ? ' · 15MB超のため選択できません' : ''}</small></span></label>`).join('')}</div>` : '<p>PDF・Markdown・テキストのあるフォルダーを選んでください。</p>'}`;
+  target.querySelectorAll<HTMLInputElement>('[data-folder-file]').forEach(
+    (el) =>
+      (el.onchange = () => {
+        folderFiles[Number(el.dataset.folderFile)]!.selected = el.checked;
+        folderSelectionSummary();
+      }),
+  );
+  const setAll = (selected: boolean) => {
+    folderFiles.forEach((f) => (f.selected = selected && f.file.size <= 15 * 1024 * 1024));
+    folderPreview();
+  };
+  const all = target.querySelector<HTMLButtonElement>('#folder-select-all'),
+    none = target.querySelector<HTMLButtonElement>('#folder-select-none');
+  if (all) all.onclick = () => setAll(true);
+  if (none) none.onclick = () => setAll(false);
+  folderSelectionSummary();
+}
+function bindFolderImport() {
+  const picker = document.querySelector<HTMLInputElement>('#material-folder');
+  const form = document.querySelector<HTMLFormElement>('#folder-import-form');
+  if (!picker || !form) return;
+  if (!('webkitdirectory' in picker)) {
+    document.querySelector('#folder-preview')!.textContent =
+      'このブラウザーではフォルダーを選べません。通常のファイル追加を使ってください。';
+    return;
+  }
+  if (folderFiles.length) folderPreview();
+  picker.onchange = () => {
+    const files = Array.from(picker.files ?? []);
+    folderFiles = files
+      .filter(
+        (file) =>
+          /\.(pdf|md|txt)$/i.test(file.name) &&
+          !(file.webkitRelativePath || file.name)
+            .split('/')
+            .some((part) => part.startsWith('.') || part === 'node_modules'),
+      )
+      .map((file) => ({
+        file,
+        path: file.webkitRelativePath || file.name,
+        selected: file.size <= 15 * 1024 * 1024,
+      }))
+      .sort(
+        (a, b) =>
+          a.path.localeCompare(b.path, 'ja', { numeric: true }) ||
+          (a.path < b.path ? -1 : a.path > b.path ? 1 : 0),
+      );
+    folderSkipped = files.length - folderFiles.length;
+    const name = document.querySelector<HTMLInputElement>('#folder-title')!;
+    if (!name.value.trim())
+      name.value = (files[0]?.webkitRelativePath.split('/')[0] || 'まとめた資料').slice(0, 160);
+    document.querySelector<HTMLElement>('#folder-error')!.hidden = true;
+    folderPreview();
+  };
+  form.onsubmit = (e) => {
+    e.preventDefault();
+    void run(async () => {
+      const selected = folderFiles.filter((f) => f.selected);
+      if (
+        !selected.length ||
+        selected.length > 50 ||
+        selected.reduce((sum, f) => sum + f.file.size, 0) > 100 * 1024 * 1024
+      ) {
+        folderSelectionSummary();
+        return;
+      }
+      const data = new FormData();
+      data.append('title', document.querySelector<HTMLInputElement>('#folder-title')!.value.trim());
+      data.append('paths', JSON.stringify(selected.map((f) => f.path)));
+      selected.forEach((f) => data.append('files', f.file, f.file.name));
+      const button = document.querySelector<HTMLButtonElement>('#folder-submit')!,
+        error = document.querySelector<HTMLElement>('#folder-error')!;
+      button.disabled = true;
+      picker.disabled = true;
+      busy = true;
+      form
+        .querySelectorAll<HTMLInputElement | HTMLButtonElement>('input, button')
+        .forEach((el) => (el.disabled = true));
+      button.textContent = '資料の本文を確認しています…';
+      error.hidden = true;
+      try {
+        const imported = await api<{ id: string; files: number }>('/materials/folder', {
+          method: 'POST',
+          body: data,
+        });
+        await reload();
+        courseId = imported.id;
+        chapterId = current().chapters[0]!.id;
+        tab = 'read';
+        view = 'study';
+        folderFiles = [];
+        folderSkipped = 0;
+        render();
+        window.scrollTo(0, 0);
+        notice(
+          `${imported.files}資料を1つの教材にまとめました。本文を確認してからAI教材を作れます。`,
+        );
+      } catch (err) {
+        error.hidden = false;
+        error.textContent =
+          err instanceof Error
+            ? err.message
+            : '取り込めませんでした。選択した資料を確認してください。';
+      } finally {
+        busy = false;
+        form
+          .querySelectorAll<HTMLInputElement | HTMLButtonElement>('input, button')
+          .forEach((el) => (el.disabled = false));
+        picker.disabled = false;
+        button.textContent = '選択した資料をまとめて追加';
+        if (form.isConnected) folderPreview();
+      }
+    });
+  };
+}
 function importForm() {
-  return `<div class="topline"><div><span class="eyebrow">BUILD YOUR LIBRARY</span><h1>学びたい教材を追加する</h1><p>科目を問わず、使いたい教材を何度でも。</p></div></div>${materialPromptPanel()}<div class="paper form"><span class="eyebrow">STEP 2 · 教材を取り込む</span><h2>元資料・完成した教材を追加する</h2><form id="import-form"><label for="material-title">教材の名前</label><input id="material-title" name="title" placeholder="例：統計学 第1回"><label for="material-file">教材ファイル</label><input id="material-file" name="file" type="file" accept=".pdf,.md,.txt,.json" required><p class="muted">PDF・Markdown・テキスト、または問題付き教材パッケージ（JSON）。1ファイル15MBまで。</p><p class="hint">問題付きのJSONなら、そのまま学習・採点を始められます。本文だけのファイルは、まず読むための教材として追加します。追加後に「この資料からAI教材を作る」で、解説・問題・解答・採点基準をまとめて生成できます。</p><p class="hint">PDFは文字を取り出せるものに対応します。画像だけのPDF、図表や数式の配置は正確に読み取れない場合があるため、追加後に本文を確認してください。元ファイルは変更しません。</p><button class="primary" type="submit">この教材を追加する</button></form></div>`;
+  return `<div class="topline"><div><span class="eyebrow">BUILD YOUR LIBRARY</span><h1>学びたい教材を追加する</h1><p>科目を問わず、使いたい教材を何度でも。</p></div></div>${folderImportPanel()}${materialPromptPanel()}<div class="paper form"><span class="eyebrow">STEP 2 · 教材を取り込む</span><h2>元資料・完成した教材を追加する</h2><form id="import-form"><label for="material-title">教材の名前</label><input id="material-title" name="title" placeholder="例：統計学 第1回"><label for="material-file">教材ファイル</label><input id="material-file" name="file" type="file" accept=".pdf,.md,.txt,.json" required><p class="muted">PDF・Markdown・テキスト、または問題付き教材パッケージ（JSON）。1ファイル15MBまで。</p><p class="hint">問題付きのJSONなら、そのまま学習・採点を始められます。本文だけのファイルは、まず読むための教材として追加します。追加後に「この資料からAI教材を作る」で、解説・問題・解答・採点基準をまとめて生成できます。</p><p class="hint">PDFは文字を取り出せるものに対応します。画像だけのPDF、図表や数式の配置は正確に読み取れない場合があるため、追加後に本文を確認してください。元ファイルは変更しません。</p><button class="primary" type="submit">この教材を追加する</button></form></div>`;
 }
 function settings() {
   return `<div class="topline"><div><span class="eyebrow">AI CONNECTION</span><h1>INIAD AI-MOPの設定</h1><p>普段はLuna、必要なときにAstra。</p></div></div><div class="paper form"><span class="tag ${status.aiConfigured ? '' : 'warn'}">${status.aiConfigured ? '鍵を設定済み（接続は未確認）' : '未設定'}</span><form id="settings-form"><label for="api-key">AI-MOPのAPIキー</label><input id="api-key" type="password" autocomplete="off" placeholder="${status.aiConfigured ? '変更するときだけ入力' : 'ご自身のパソコンで入力してください'}" ${status.aiConfigured ? '' : 'required'}><small>Windowsではユーザー単位で暗号化し、プロジェクト外に保存します。画面やGitHubへキーを出しません。</small><label for="model-name">標準のモデル名</label><input id="model-name" list="model-options" value="${esc(status.model)}" required pattern="[a-zA-Z0-9._:/\-]+"><datalist id="model-options"><option value="gpt-6-luna"><option value="gpt-6-astra"></datalist><p><small>AI-MOPで利用できる正式な名前を指定します。Lunaを普段の採点に使い、必要な問題だけAstraを選べます。</small></p><div class="actions"><button type="submit" class="primary">設定を保存</button><button type="button" data-action="models" ${status.aiConfigured ? '' : 'disabled'}>利用できるモデルを確認</button></div><p id="model-result" class="hint" hidden></p></form><div class="settings-separator"><h3>利用枠を大切に使うために</h3><p class="muted">1問ずつ採点し、過去の会話全体は送りません。失敗した処理は自動で再送しません。残りの利用枠はAI-MOP側で確認してください。</p><small>このアプリは自分のパソコン専用です。共有・公開して使う機能は初期版には含まれません。</small></div></div>`;
@@ -410,6 +544,7 @@ async function openQuestion(id: string, fresh = false) {
   window.scrollTo(0, 0);
 }
 function bind() {
+  bindFolderImport();
   document.querySelectorAll<HTMLElement>('[data-tutor-session]').forEach(
     (el) =>
       (el.onclick = () => {

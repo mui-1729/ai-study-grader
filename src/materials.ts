@@ -71,3 +71,74 @@ export function materialCourse(title: string, content: string): Course {
     questions: [],
   });
 }
+export class FolderMaterialError extends Error {}
+export function materialPath(path: string): string {
+  const normalized = path.replace(/\\/g, '/');
+  const parts = normalized.split('/');
+  if (
+    normalized.length > 512 ||
+    parts.some((p) => !p || p.startsWith('.') || p === 'node_modules') ||
+    /[\x00-\x1f:]/.test(normalized) ||
+    !/\.(pdf|md|txt)$/i.test(normalized)
+  )
+    throw new FolderMaterialError(
+      'フォルダーにはPDF・Markdown・テキストだけを選んでください。隠しフォルダー・開発用フォルダーは対象外です。',
+    );
+  return normalized;
+}
+export async function folderMaterialCourse(
+  title: string,
+  files: { path: string; buffer: Buffer }[],
+): Promise<Course> {
+  if (!files.length || files.length > 50)
+    throw new FolderMaterialError('一度に追加できる資料は1〜50ファイルです。');
+  const entries = files.map((file) => ({ ...file, path: materialPath(file.path) }));
+  if (new Set(entries.map((f) => f.path.toLowerCase())).size !== entries.length)
+    throw new FolderMaterialError('同じ相対パスの資料が重複しています。');
+  if (
+    entries.some((f) => f.buffer.length > 15 * 1024 * 1024) ||
+    entries.reduce((s, f) => s + f.buffer.length, 0) > 100 * 1024 * 1024
+  )
+    throw new FolderMaterialError('資料は1ファイル15MB以下、合計100MB以下で選んでください。');
+  // Numeric file ordering makes lecture-2 precede lecture-10 and keeps subfolder names.
+  entries.sort(
+    (a, b) =>
+      a.path.localeCompare(b.path, 'ja', { numeric: true }) ||
+      (a.path < b.path ? -1 : a.path > b.path ? 1 : 0),
+  );
+  const chapters: Course['chapters'] = [];
+  let total = 0;
+  for (const file of entries) {
+    let content: string;
+    try {
+      content = await extractMaterial({ originalname: file.path, buffer: file.buffer });
+      if (content.trim().length < 10) throw new Error();
+    } catch {
+      throw new FolderMaterialError(
+        `「${file.path}」を読み取れませんでした。UTF-8の本文、または文字を抽出できる150ページ以内のPDFを使ってください。まだ教材は追加していません。この資料を外して再試行できます。`,
+      );
+    }
+    total += content.length;
+    if (total > 500000)
+      throw new FolderMaterialError(
+        '本文の合計は500,000文字以内にしてください。選択する資料を減らしてください。まだ教材は追加していません。',
+      );
+    for (let start = 0, part = 1; start < content.length; start += 24000, part++) {
+      chapters.push({
+        id: `ch-${chapters.length + 1}`,
+        title: file.path + (content.length > 24000 ? `（${part}）` : ''),
+        content: content.slice(start, start + 24000),
+      });
+    }
+  }
+  return courseSchema.parse({
+    schemaVersion: 1,
+    id: `course-${randomUUID()}`,
+    version: '1',
+    title,
+    description: `フォルダーから${entries.length}資料をまとめて追加した元資料`,
+    gradingPolicy: '同じ意味の表現や正しい別解を認める。',
+    chapters,
+    questions: [],
+  });
+}

@@ -917,3 +917,33 @@ form button[type='submit'] {
     font-size: 13px;
   }
 }
+.folder-file-list {
+  max-height: 320px;
+  overflow: auto;
+  margin: 14px 0;
+  border: 1px solid #dce2d8;
+  border-radius: 10px;
+}
+.form label.folder-file {
+  display: flex;
+  align-items: start;
+  gap: 10px;
+  margin: 0;
+  padding: 10px 12px;
+  font-weight: normal;
+  border-bottom: 1px solid #e8ebe5;
+}
+.form .folder-file input[type='checkbox'] {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  margin: 3px 0 0;
+}
+.folder-file span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.folder-file small {
+  display: block;
+  color: #64756c;
+}
