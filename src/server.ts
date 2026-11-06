@@ -13,6 +13,7 @@ import { questionSchema, courseSchema, type Grade } from './schema.js';
 import { loadConfig, saveConfig, INIAD_BASE_URL } from './config.js';
 import { extractMaterial, materialCourse, persistCourse } from './materials.js';
 import { usageSummary } from './usage.js';
+import { acquireDataLock } from './runtime-lock.js';
 export function createApp(dataDir = resolve('data')) {
   mkdirSync(dataDir, { recursive: true });
   const coursesDir = join(dataDir, 'courses');
@@ -339,7 +340,15 @@ export function createApp(dataDir = resolve('data')) {
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const port = Number(process.env.PORT || 4317);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('PORTが不正です');
-  const { app, store } = createApp();
+  const dataLock = acquireDataLock(resolve('data'), 'server');
+  let running: ReturnType<typeof createApp>;
+  try {
+    running = createApp();
+  } catch (error) {
+    dataLock.release();
+    throw error;
+  }
+  const { app, store } = running;
   const server = app.listen(port, '127.0.0.1', () => {
     const url = `http://127.0.0.1:${port}`;
     console.log(`Study Studio: ${url}`);
@@ -356,10 +365,25 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
       browserProcess.unref();
     }
   });
-  process.on('SIGINT', () =>
+  server.on('error', () => {
+    store.close();
+    dataLock.release();
+    console.error(
+      'アプリを起動できませんでした。既に起動していないか、ポート設定を確認してください。',
+    );
+    process.exitCode = 1;
+  });
+  let closing = false;
+  const stop = () => {
+    if (closing) return;
+    closing = true;
     server.close(() => {
       store.close();
+      dataLock.release();
       process.exit(0);
-    }),
-  );
+    });
+  };
+  process.on('SIGINT', stop);
+  process.on('SIGTERM', stop);
+  process.on('exit', () => dataLock.release());
 }

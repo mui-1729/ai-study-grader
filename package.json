@@ -16,6 +16,7 @@
     "import:course": "node --import tsx scripts/import-course.ts",
     "import:package": "node --import tsx scripts/import-package.ts",
     "validate:package": "node --import tsx scripts/validate-package.ts",
+    "append:package": "node --import tsx scripts/append-package.ts",
     "setup:ai": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/setup-ai.ps1"
   },
   "type": "module",
