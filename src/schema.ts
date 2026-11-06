@@ -54,7 +54,13 @@ export const courseSchema = z
   });
 export type Course = z.infer<typeof courseSchema>;
 export type Question = Course['questions'][number];
-export type CriterionResult = { id: string; points: number; reason: string; evidence: string };
+export type CriterionResult = {
+  id: string;
+  points: number;
+  reason: string;
+  evidence: string;
+  evidenceLineIds?: number[];
+};
 export type Grade = {
   mode: 'ai' | 'exact' | 'self';
   score: number;

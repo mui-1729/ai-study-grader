@@ -20,6 +20,7 @@ type View =
   | 'usage';
 let usageData: ReturnType<typeof usageSummary> | null = null;
 let materialPromptText = '';
+let gradingError = '';
 let courses: PublicCourse[] = [],
   history: Attempt[] = [],
   status = { aiConfigured: false, model: 'gpt-6-luna', token: '' };
@@ -83,6 +84,13 @@ function render() {
     .join(
       '',
     )}<div class="local">● このパソコンに保存<br>自分のペースで、一歩ずつ。</div></aside><main>${body()}</main></div>`;
+  if (view === 'question' && gradingError) {
+    const error = document.createElement('p');
+    error.className = 'hint warn';
+    error.setAttribute('role', 'alert');
+    error.textContent = gradingError;
+    document.querySelector('.paper')?.append(error);
+  }
   bind();
 }
 function body(): string {
@@ -208,6 +216,7 @@ async function openQuestion(id: string, fresh = false) {
   questionId = id;
   solution = null;
   result = null;
+  gradingError = '';
   answer = fresh ? '' : (await api<{ answer: string }>(`/draft/${courseId}/${id}`)).answer;
   view = 'question';
   render();
@@ -484,6 +493,8 @@ async function action(name: string) {
       return;
     }
     const model = document.querySelector<HTMLSelectElement>('#grade-model')!.value;
+    gradingError = '';
+    result = null;
     busy = true;
     render();
     try {
@@ -493,6 +504,12 @@ async function action(name: string) {
       });
       history = await api('/history');
       solution = null;
+    } catch (error) {
+      gradingError =
+        error instanceof Error
+          ? error.message
+          : '採点を完了できませんでした。回答は保存されています。';
+      throw error;
     } finally {
       busy = false;
       render();

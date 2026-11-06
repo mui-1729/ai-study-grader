@@ -3,6 +3,7 @@ export type UsageEvent = {
   usage?: UsageMetrics;
   limits?: Record<string, string>;
   httpStatus?: number;
+  failureCode?: string;
 };
 export type UsageLog = {
   id: string;
@@ -12,6 +13,9 @@ export type UsageLog = {
   usage: UsageMetrics | null;
   limits: Record<string, string>;
   httpStatus?: number;
+  failureCode?: string;
+  courseId?: string;
+  questionId?: string;
 };
 export type QuotaSnapshot = {
   remaining: number;

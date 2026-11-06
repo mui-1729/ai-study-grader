@@ -8,7 +8,7 @@ import { pathToFileURL } from 'node:url';
 import { z } from 'zod';
 import multer from 'multer';
 import { loadCourses, Store, courseHash } from './store.js';
-import { gradeAI, gradeExact } from './grading.js';
+import { gradeAI, gradeExact, GradingResponseError } from './grading.js';
 import { questionSchema, courseSchema, type Grade } from './schema.js';
 import { loadConfig, saveConfig, INIAD_BASE_URL } from './config.js';
 import { extractMaterial, materialCourse, persistCourse } from './materials.js';
@@ -235,7 +235,10 @@ export function createApp(dataDir = resolve('data')) {
             error: 'AI-MOPは未設定です。自己採点を利用するか、AI接続を設定してください。',
           });
         busy = true;
-        const usageId = store.startUsage(body.model ?? config.model);
+        const usageId = store.startUsage(body.model ?? config.model, {
+          courseId: course.id,
+          questionId: q.id,
+        });
         try {
           grade = await gradeAI(
             course,
@@ -249,7 +252,20 @@ export function createApp(dataDir = resolve('data')) {
           );
           store.updateUsage(usageId, {}, 'completed');
         } catch (error) {
-          store.updateUsage(usageId, {}, 'failed');
+          const failureCode =
+            error instanceof GradingResponseError
+              ? error.code
+              : APICallError.isInstance(error)
+                ? `http_${error.statusCode ?? 'unknown'}`
+                : error instanceof Error && ['TimeoutError', 'AbortError'].includes(error.name)
+                  ? 'timeout'
+                  : 'connection_error';
+          store.updateUsage(usageId, { failureCode }, 'failed');
+          if (error instanceof GradingResponseError)
+            return void res.status(502).json({
+              error: `${error.message} 点数は記録していません。回答は保存されています。自動再送はしていません。`,
+              code: error.code,
+            });
           if (APICallError.isInstance(error) && error.statusCode === 429)
             return void res.status(429).json({
               error:

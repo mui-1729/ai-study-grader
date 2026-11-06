@@ -75,7 +75,7 @@ export class Store {
   close() {
     this.db.close();
   }
-  startUsage(model: string) {
+  startUsage(model: string, context?: { courseId: string; questionId: string }) {
     const record: UsageLog = {
       id: randomUUID(),
       createdAt: new Date().toISOString(),
@@ -83,6 +83,7 @@ export class Store {
       status: 'running',
       usage: null,
       limits: {},
+      ...context,
     };
     this.db
       .prepare('INSERT INTO api_usage VALUES (?,?,?)')
