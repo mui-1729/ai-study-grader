@@ -23,7 +23,11 @@ let materialPromptText = '';
 let gradingError = '';
 let courses: PublicCourse[] = [],
   history: Attempt[] = [],
-  status = { aiConfigured: false, model: 'gpt-6-luna', token: '' };
+  status: { aiConfigured: boolean; model: string; token: string; appVersion?: string } = {
+    aiConfigured: false,
+    model: 'gpt-6-luna',
+    token: '',
+  };
 let view: View = 'home',
   courseId = '',
   chapterId = '',
@@ -90,6 +94,14 @@ function render() {
     error.setAttribute('role', 'alert');
     error.textContent = gradingError;
     document.querySelector('.paper')?.append(error);
+  }
+  if (view === 'settings') {
+    const version = document.createElement('p');
+    version.className = 'muted';
+    version.textContent = status.appVersion
+      ? `アプリの版：${status.appVersion}`
+      : 'アプリの版：旧版です。起動し直してください。';
+    document.querySelector('.settings-separator')?.append(version);
   }
   bind();
 }

@@ -58,6 +58,7 @@ export function createApp(dataDir = resolve('data')) {
   app.get('/api/status', (_req, res) =>
     res.json({
       aiConfigured: Boolean(config.apiKey),
+      appVersion: '2026.11.06.1',
       provider: 'INIAD AI-MOP',
       model: config.model,
       token: csrf,

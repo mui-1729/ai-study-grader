@@ -325,6 +325,7 @@ test('回答→採点→履歴、下書き、教材追加、秘密情報の保�
       aiConfigured: boolean;
     };
     assert.equal(state.aiConfigured, false);
+    assert.equal((state as typeof state & { appVersion: string }).appVersion, '2026.11.06.1');
     const promptResponse = await request('/material-prompt');
     assert.equal(promptResponse.status, 200);
     const { prompt } = await promptResponse.json();
