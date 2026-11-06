@@ -1,3 +1,5 @@
+import { readFile } from 'node:fs/promises';
+import { MATERIAL_LIMITS } from './material-limits.js';
 import express from 'express';
 import { spawn } from 'node:child_process';
 import { APICallError } from 'ai';
@@ -18,7 +20,7 @@ import {
   folderMaterialCourse,
   FolderMaterialError,
 } from './materials.js';
-import { folderUpload } from './folder-upload.js';
+import { folderUpload, removeUpload } from './folder-upload.js';
 import { usageSummary } from './usage.js';
 import { acquireDataLock } from './runtime-lock.js';
 import { defaultCredentialVault, type CredentialVault } from './credentials.js';
@@ -87,7 +89,7 @@ export function createApp(
   app.get('/api/status', (_req, res) =>
     res.json({
       aiConfigured: Boolean(config.apiKey),
-      appVersion: '2026.11.06.3',
+      appVersion: '2026.11.06.4',
       credentialStorage: config.credentialStorage,
       provider: 'INIAD AI-MOP',
       model: config.model,
@@ -147,7 +149,7 @@ export function createApp(
   });
   const upload = multer({
     storage: multer.memoryStorage(),
-    limits: { fileSize: 15 * 1024 * 1024, files: 1 },
+    limits: { fileSize: MATERIAL_LIMITS.fileBytes, files: 1 },
   });
   app.post('/api/materials', upload.single('file'), async (req, res, next) => {
     try {
@@ -176,35 +178,49 @@ export function createApp(
       next(error);
     }
   });
-  app.post('/api/materials/folder', folderUpload(), async (req, res, next) => {
-    try {
-      const body = z
-        .object({
-          title: z.string().trim().min(1).max(160),
-          paths: z
-            .string()
-            .transform((value) =>
-              z.array(z.string().min(1).max(512)).min(1).max(50).parse(JSON.parse(value)),
-            ),
-        })
-        .strict()
-        .parse(req.body);
-      const files = req.files as Express.Multer.File[] | undefined;
-      if (!files?.length || files.length !== body.paths.length)
-        return void res.status(400).json({ error: '選択した資料の一覧を確認してください。' });
-      const course = await folderMaterialCourse(
-        body.title,
-        files.map((file, i) => ({ path: body.paths[i]!, buffer: file.buffer })),
-      );
-      persistCourse(coursesDir, course);
-      courses.push(course);
-      res
-        .status(201)
-        .json({ id: course.id, files: files.length, chapters: course.chapters.length });
-    } catch (error) {
-      next(error);
-    }
-  });
+  app.post(
+    '/api/materials/folder',
+    folderUpload(join(dataDir, 'uploads')),
+    async (req, res, next) => {
+      let imported: { id: string; files: number; chapters: number };
+      try {
+        const body = z
+          .object({
+            title: z.string().trim().min(1).max(160),
+            paths: z
+              .string()
+              .transform((value) =>
+                z
+                  .array(z.string().min(1).max(512))
+                  .min(1)
+                  .max(MATERIAL_LIMITS.folderFiles)
+                  .parse(JSON.parse(value)),
+              ),
+          })
+          .strict()
+          .parse(req.body);
+        const files = req.files as Express.Multer.File[] | undefined;
+        if (!files?.length || files.length !== body.paths.length)
+          throw new FolderMaterialError('選択した資料の一覧を確認してください。');
+        const course = await folderMaterialCourse(
+          body.title,
+          files.map((file, i) => ({
+            path: body.paths[i]!,
+            size: file.size,
+            read: () => readFile(file.path),
+          })),
+        );
+        persistCourse(coursesDir, course);
+        courses.push(course);
+        imported = { id: course.id, files: files.length, chapters: course.chapters.length };
+      } finally {
+        await Promise.allSettled(
+          ((req.files as Express.Multer.File[] | undefined) ?? []).map(removeUpload),
+        );
+      }
+      res.status(201).json(imported);
+    },
+  );
   app.post('/api/questions', (req, res) => {
     const body = z
       .object({ courseId: z.string(), question: questionSchema })
@@ -599,16 +615,17 @@ export function createApp(
   app.get('/vendor/purify.js', (_req, res) =>
     res.sendFile(resolve('node_modules/dompurify/dist/purify.es.mjs')),
   );
+  app.get('/material-limits.js', (_req, res) => res.sendFile(resolve('dist/material-limits.js')));
   app.get('/app.js', (_req, res) => res.sendFile(resolve('dist/client/app.js')));
   app.use(express.static(resolve('public')));
   app.use(
     (error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
       const known = [
         'このPDFから本文を取り出せませんでした。画像だけのPDFは、文字起こししたテキストを追加してください。',
-        'PDFは150ページ以内に分けてください。',
+        'PDFは1,000ページ以内に分けてください。',
         '本文が長すぎます。ファイルを分けてください。',
         'PDF・Markdown・テキストを選んでください。',
-        '本文は10〜500,000文字で追加してください。',
+        '本文は10〜5,000,000文字で追加してください。',
         '問題が見つかりません。',
       ];
       res.status(400).json({
@@ -616,11 +633,11 @@ export function createApp(
           error instanceof FolderMaterialError
             ? error.message
             : error instanceof Error && error.message === 'folder_total_size'
-              ? '資料の合計は100MB以下にしてください。まだ教材は追加していません。'
+              ? '資料の合計は500MB以下にしてください。まだ教材は追加していません。'
               : error instanceof z.ZodError
                 ? '入力内容や教材パッケージの形式を確認してください。'
                 : error instanceof multer.MulterError
-                  ? '資料は1ファイル15MB以下で選んでください。フォルダーは最大50ファイル・合計100MBです。'
+                  ? '資料は1ファイル50MB以下で選んでください。フォルダーは最大200ファイル・合計500MBです。'
                   : error instanceof Error && known.includes(error.message)
                     ? error.message
                     : '処理できませんでした。入力内容・ファイル形式を確認してください。',

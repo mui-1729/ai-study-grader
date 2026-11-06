@@ -1,3 +1,4 @@
+import { MATERIAL_LIMITS } from '../material-limits.js';
 // Browser modules are served locally; no CDN or external requests.
 // @ts-ignore Browser import path
 import { marked } from '/vendor/marked.js';
@@ -376,22 +377,25 @@ function materialPromptPanel() {
   </section>`;
 }
 function folderImportPanel() {
-  return `<section class="paper form"><h2>フォルダーからまとめて追加</h2><p>サブフォルダーも含め、PDF・Markdown・テキストを1つの教材にまとめます。</p><form id="folder-import-form"><label for="material-folder">資料のフォルダー</label><input id="material-folder" type="file" webkitdirectory multiple><label for="folder-title">まとめる教材の名前</label><input id="folder-title" maxlength="160" required placeholder="例：情報数学 第1〜6回"><div id="folder-preview"></div><p class="hint">一度に最大50ファイル・合計100MB・本文合計500,000文字。1ファイル15MBまで。JSON教材は下のファイル欄で別に追加してください。選択した資料だけをこのPCのアプリへ取り込み、この段階ではAIへ送りません。</p><p id="folder-error" class="hint warn" role="alert" hidden></p><button type="submit" class="primary" id="folder-submit" disabled>選択した資料をまとめて追加</button></form><p class="hint">追加後に「この資料からAI教材を作る」でまとめて教材化できます。PDFの図表や画像は本文へ正しく反映されない場合があるため、取り込んだ内容を確認してください。</p></section>`;
+  return `<section class="paper form"><h2>フォルダーからまとめて追加</h2><p>サブフォルダーも含め、PDF・Markdown・テキストを1つの教材にまとめます。</p><form id="folder-import-form"><label for="material-folder">資料のフォルダー</label><input id="material-folder" type="file" webkitdirectory multiple><label for="folder-title">まとめる教材の名前</label><input id="folder-title" maxlength="160" required placeholder="例：情報数学 第1〜6回"><div id="folder-preview"></div><p class="hint">一度に最大200ファイル・合計500MB・本文合計5,000,000文字。1ファイル50MBまで。JSON教材は下のファイル欄で別に追加してください。選択した資料だけをこのPCのアプリへ取り込み、この段階ではAIへ送りません。</p><p id="folder-error" class="hint warn" role="alert" hidden></p><button type="submit" class="primary" id="folder-submit" disabled>選択した資料をまとめて追加</button></form><p class="hint">追加後に「この資料からAI教材を作る」でまとめて教材化できます。PDFの図表や画像は本文へ正しく反映されない場合があるため、取り込んだ内容を確認してください。</p></section>`;
 }
 function folderSelectionSummary() {
   const selected = folderFiles.filter((f) => f.selected),
     total = selected.reduce((sum, f) => sum + f.file.size, 0);
-  const valid = selected.length > 0 && selected.length <= 50 && total <= 100 * 1024 * 1024;
+  const valid =
+    selected.length > 0 &&
+    selected.length <= MATERIAL_LIMITS.folderFiles &&
+    total <= MATERIAL_LIMITS.folderBytes;
   const summary = document.querySelector('#folder-summary');
   if (summary)
-    summary.textContent = `${selected.length}/${folderFiles.length}ファイルを選択 · 合計${(total / 1024 / 1024).toFixed(1)}MB。${valid ? '一覧を確認して追加してください。' : '最大50ファイル・合計100MB以内になるよう選んでください。'}`;
+    summary.textContent = `${selected.length}/${folderFiles.length}ファイルを選択 · 合計${(total / 1024 / 1024).toFixed(1)}MB。${valid ? '一覧を確認して追加してください。' : '最大200ファイル・合計500MB以内になるよう選んでください。'}`;
   const button = document.querySelector<HTMLButtonElement>('#folder-submit');
   if (button) button.disabled = !valid;
 }
 function folderPreview() {
   const target = document.querySelector('#folder-preview');
   if (!target) return;
-  target.innerHTML = `<p id="folder-summary"></p>${folderSkipped ? `<p class="muted">対象外の${folderSkipped}ファイルは送信しません（JSON・画像・隠しフォルダーなど）。</p>` : ''}${folderFiles.length ? `<div class="actions"><button type="button" id="folder-select-all">すべて選択</button><button type="button" id="folder-select-none">すべて解除</button></div><div class="folder-file-list">${folderFiles.map((f, i) => `<label class="folder-file"><input type="checkbox" data-folder-file="${i}" ${f.selected ? 'checked' : ''} ${f.file.size > 15 * 1024 * 1024 ? 'disabled' : ''}><span>${esc(f.path)}<small>${(f.file.size / 1024 / 1024).toFixed(2)}MB${f.file.size > 15 * 1024 * 1024 ? ' · 15MB超のため選択できません' : ''}</small></span></label>`).join('')}</div>` : '<p>PDF・Markdown・テキストのあるフォルダーを選んでください。</p>'}`;
+  target.innerHTML = `<p id="folder-summary"></p>${folderSkipped ? `<p class="muted">対象外の${folderSkipped}ファイルは送信しません（JSON・画像・隠しフォルダーなど）。</p>` : ''}${folderFiles.length ? `<div class="actions"><button type="button" id="folder-select-all">すべて選択</button><button type="button" id="folder-select-none">すべて解除</button></div><div class="folder-file-list">${folderFiles.map((f, i) => `<label class="folder-file"><input type="checkbox" data-folder-file="${i}" ${f.selected ? 'checked' : ''} ${f.file.size > MATERIAL_LIMITS.fileBytes ? 'disabled' : ''}><span>${esc(f.path)}<small>${(f.file.size / 1024 / 1024).toFixed(2)}MB${f.file.size > MATERIAL_LIMITS.fileBytes ? ' · 50MB超のため選択できません' : ''}</small></span></label>`).join('')}</div>` : '<p>PDF・Markdown・テキストのあるフォルダーを選んでください。</p>'}`;
   target.querySelectorAll<HTMLInputElement>('[data-folder-file]').forEach(
     (el) =>
       (el.onchange = () => {
@@ -400,7 +404,7 @@ function folderPreview() {
       }),
   );
   const setAll = (selected: boolean) => {
-    folderFiles.forEach((f) => (f.selected = selected && f.file.size <= 15 * 1024 * 1024));
+    folderFiles.forEach((f) => (f.selected = selected && f.file.size <= MATERIAL_LIMITS.fileBytes));
     folderPreview();
   };
   const all = target.querySelector<HTMLButtonElement>('#folder-select-all'),
@@ -432,7 +436,7 @@ function bindFolderImport() {
       .map((file) => ({
         file,
         path: file.webkitRelativePath || file.name,
-        selected: file.size <= 15 * 1024 * 1024,
+        selected: file.size <= MATERIAL_LIMITS.fileBytes,
       }))
       .sort(
         (a, b) =>
@@ -452,8 +456,8 @@ function bindFolderImport() {
       const selected = folderFiles.filter((f) => f.selected);
       if (
         !selected.length ||
-        selected.length > 50 ||
-        selected.reduce((sum, f) => sum + f.file.size, 0) > 100 * 1024 * 1024
+        selected.length > MATERIAL_LIMITS.folderFiles ||
+        selected.reduce((sum, f) => sum + f.file.size, 0) > MATERIAL_LIMITS.folderBytes
       ) {
         folderSelectionSummary();
         return;
@@ -508,7 +512,7 @@ function bindFolderImport() {
   };
 }
 function importForm() {
-  return `<div class="topline"><div><span class="eyebrow">BUILD YOUR LIBRARY</span><h1>学びたい教材を追加する</h1><p>科目を問わず、使いたい教材を何度でも。</p></div></div>${folderImportPanel()}${materialPromptPanel()}<div class="paper form"><span class="eyebrow">STEP 2 · 教材を取り込む</span><h2>元資料・完成した教材を追加する</h2><form id="import-form"><label for="material-title">教材の名前</label><input id="material-title" name="title" placeholder="例：統計学 第1回"><label for="material-file">教材ファイル</label><input id="material-file" name="file" type="file" accept=".pdf,.md,.txt,.json" required><p class="muted">PDF・Markdown・テキスト、または問題付き教材パッケージ（JSON）。1ファイル15MBまで。</p><p class="hint">問題付きのJSONなら、そのまま学習・採点を始められます。本文だけのファイルは、まず読むための教材として追加します。追加後に「この資料からAI教材を作る」で、解説・問題・解答・採点基準をまとめて生成できます。</p><p class="hint">PDFは文字を取り出せるものに対応します。画像だけのPDF、図表や数式の配置は正確に読み取れない場合があるため、追加後に本文を確認してください。元ファイルは変更しません。</p><button class="primary" type="submit">この教材を追加する</button></form></div>`;
+  return `<div class="topline"><div><span class="eyebrow">BUILD YOUR LIBRARY</span><h1>学びたい教材を追加する</h1><p>科目を問わず、使いたい教材を何度でも。</p></div></div>${folderImportPanel()}${materialPromptPanel()}<div class="paper form"><span class="eyebrow">STEP 2 · 教材を取り込む</span><h2>元資料・完成した教材を追加する</h2><form id="import-form"><label for="material-title">教材の名前</label><input id="material-title" name="title" placeholder="例：統計学 第1回"><label for="material-file">教材ファイル</label><input id="material-file" name="file" type="file" accept=".pdf,.md,.txt,.json" required><p class="muted">PDF・Markdown・テキスト、または問題付き教材パッケージ（JSON）。1ファイル50MBまで。</p><p class="hint">問題付きのJSONなら、そのまま学習・採点を始められます。本文だけのファイルは、まず読むための教材として追加します。追加後に「この資料からAI教材を作る」で、解説・問題・解答・採点基準をまとめて生成できます。</p><p class="hint">PDFは文字を取り出せるものに対応します。画像だけのPDF、図表や数式の配置は正確に読み取れない場合があるため、追加後に本文を確認してください。元ファイルは変更しません。</p><button class="primary" type="submit">この教材を追加する</button></form></div>`;
 }
 function settings() {
   return `<div class="topline"><div><span class="eyebrow">AI CONNECTION</span><h1>INIAD AI-MOPの設定</h1><p>普段はLuna、必要なときにAstra。</p></div></div><div class="paper form"><span class="tag ${status.aiConfigured ? '' : 'warn'}">${status.aiConfigured ? '鍵を設定済み（接続は未確認）' : '未設定'}</span><form id="settings-form"><label for="api-key">AI-MOPのAPIキー</label><input id="api-key" type="password" autocomplete="off" placeholder="${status.aiConfigured ? '変更するときだけ入力' : 'ご自身のパソコンで入力してください'}" ${status.aiConfigured ? '' : 'required'}><small>Windowsではユーザー単位で暗号化し、プロジェクト外に保存します。画面やGitHubへキーを出しません。</small><label for="model-name">標準のモデル名</label><input id="model-name" list="model-options" value="${esc(status.model)}" required pattern="[a-zA-Z0-9._:/\-]+"><datalist id="model-options"><option value="gpt-6-luna"><option value="gpt-6-astra"></datalist><p><small>AI-MOPで利用できる正式な名前を指定します。Lunaを普段の採点に使い、必要な問題だけAstraを選べます。</small></p><div class="actions"><button type="submit" class="primary">設定を保存</button><button type="button" data-action="models" ${status.aiConfigured ? '' : 'disabled'}>利用できるモデルを確認</button></div><p id="model-result" class="hint" hidden></p></form><div class="settings-separator"><h3>利用枠を大切に使うために</h3><p class="muted">1問ずつ採点し、過去の会話全体は送りません。失敗した処理は自動で再送しません。残りの利用枠はAI-MOP側で確認してください。</p><small>このアプリは自分のパソコン専用です。共有・公開して使う機能は初期版には含まれません。</small></div></div>`;

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { MATERIAL_LIMITS } from './material-limits.js';
 const id = z.string().regex(/^[a-z0-9][a-z0-9_-]{0,79}$/);
 const text = z.string().trim().min(1).max(100000);
 export const criterionSchema = z
@@ -41,7 +42,7 @@ export const courseSchema = z
     chapters: z
       .array(z.object({ id, title: text, content: text }).strict())
       .min(1)
-      .max(200),
+      .max(MATERIAL_LIMITS.chapters),
     questions: z.array(questionSchema).max(2000),
   })
   .strict()

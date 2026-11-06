@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { courseSchema, type Course } from './schema.js';
+import { MATERIAL_LIMITS } from './material-limits.js';
 export function persistCourse(directory: string, raw: unknown): Course {
   const course = courseSchema.parse(raw);
   writeFileSync(join(directory, `${course.id}.json`), JSON.stringify(course, null, 2), {
@@ -26,7 +27,8 @@ export async function extractMaterial(file: {
   });
   try {
     const doc = await task.promise;
-    if (doc.numPages > 150) throw new Error('PDFは150ページ以内に分けてください。');
+    if (doc.numPages > MATERIAL_LIMITS.pdfPages)
+      throw new Error('PDFは1,000ページ以内に分けてください。');
     let text = '';
     for (let i = 1; i <= doc.numPages; i++) {
       const page = await doc.getPage(i),
@@ -38,7 +40,8 @@ export async function extractMaterial(file: {
             'str' in item ? item.str + ('hasEOL' in item && item.hasEOL ? '\n' : ' ') : '',
           )
           .join('');
-      if (text.length > 500000) throw new Error('本文が長すぎます。ファイルを分けてください。');
+      if (text.length > MATERIAL_LIMITS.textCharacters)
+        throw new Error('本文が長すぎます。ファイルを分けてください。');
     }
     const body = text.replace(/^## \d+ページ/gm, '').trim();
     if (body.length < 50)
@@ -51,8 +54,8 @@ export async function extractMaterial(file: {
   }
 }
 export function materialCourse(title: string, content: string): Course {
-  if (content.trim().length < 10 || content.length > 500000)
-    throw new Error('本文は10〜500,000文字で追加してください。');
+  if (content.trim().length < 10 || content.length > MATERIAL_LIMITS.textCharacters)
+    throw new Error('本文は10〜5,000,000文字で追加してください。');
   const chunks: string[] = [];
   for (let start = 0; start < content.length; start += 24000)
     chunks.push(content.slice(start, start + 24000));
@@ -86,20 +89,24 @@ export function materialPath(path: string): string {
     );
   return normalized;
 }
+export type FolderMaterial = { path: string } & (
+  { buffer: Buffer } | { size: number; read: () => Promise<Buffer> }
+);
 export async function folderMaterialCourse(
   title: string,
-  files: { path: string; buffer: Buffer }[],
+  files: FolderMaterial[],
 ): Promise<Course> {
-  if (!files.length || files.length > 50)
-    throw new FolderMaterialError('一度に追加できる資料は1〜50ファイルです。');
+  if (!files.length || files.length > MATERIAL_LIMITS.folderFiles)
+    throw new FolderMaterialError('一度に追加できる資料は1〜200ファイルです。');
   const entries = files.map((file) => ({ ...file, path: materialPath(file.path) }));
   if (new Set(entries.map((f) => f.path.toLowerCase())).size !== entries.length)
     throw new FolderMaterialError('同じ相対パスの資料が重複しています。');
   if (
-    entries.some((f) => f.buffer.length > 15 * 1024 * 1024) ||
-    entries.reduce((s, f) => s + f.buffer.length, 0) > 100 * 1024 * 1024
+    entries.some((f) => ('buffer' in f ? f.buffer.length : f.size) > MATERIAL_LIMITS.fileBytes) ||
+    entries.reduce((s, f) => s + ('buffer' in f ? f.buffer.length : f.size), 0) >
+      MATERIAL_LIMITS.folderBytes
   )
-    throw new FolderMaterialError('資料は1ファイル15MB以下、合計100MB以下で選んでください。');
+    throw new FolderMaterialError('資料は1ファイル50MB以下、合計500MB以下で選んでください。');
   // Numeric file ordering makes lecture-2 precede lecture-10 and keeps subfolder names.
   entries.sort(
     (a, b) =>
@@ -111,17 +118,19 @@ export async function folderMaterialCourse(
   for (const file of entries) {
     let content: string;
     try {
-      content = await extractMaterial({ originalname: file.path, buffer: file.buffer });
+      const buffer = 'buffer' in file ? file.buffer : await file.read();
+      if (buffer.length > MATERIAL_LIMITS.fileBytes) throw new Error();
+      content = await extractMaterial({ originalname: file.path, buffer });
       if (content.trim().length < 10) throw new Error();
     } catch {
       throw new FolderMaterialError(
-        `「${file.path}」を読み取れませんでした。UTF-8の本文、または文字を抽出できる150ページ以内のPDFを使ってください。まだ教材は追加していません。この資料を外して再試行できます。`,
+        `「${file.path}」を読み取れませんでした。UTF-8の本文、または文字を抽出できる1,000ページ以内のPDFを使ってください。まだ教材は追加していません。この資料を外して再試行できます。`,
       );
     }
     total += content.length;
-    if (total > 500000)
+    if (total > MATERIAL_LIMITS.textCharacters)
       throw new FolderMaterialError(
-        '本文の合計は500,000文字以内にしてください。選択する資料を減らしてください。まだ教材は追加していません。',
+        '本文の合計は5,000,000文字以内にしてください。選択する資料を減らしてください。まだ教材は追加していません。',
       );
     for (let start = 0, part = 1; start < content.length; start += 24000, part++) {
       chapters.push({
