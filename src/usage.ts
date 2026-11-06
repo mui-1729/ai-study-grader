@@ -16,6 +16,7 @@ export type UsageLog = {
   failureCode?: string;
   courseId?: string;
   questionId?: string;
+  purpose?: 'grading' | 'tutoring' | 'authoring';
 };
 export type QuotaSnapshot = {
   remaining: number;

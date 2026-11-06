@@ -11,6 +11,8 @@ export const questionSchema = z
     title: text,
     kind: z.enum(['written', 'exact']),
     prompt: text,
+    context: text.optional(),
+    contextQuestionIds: z.array(id).max(20).optional(),
     maxPoints: z.number().int().positive().max(1000),
     modelAnswer: text,
     rubric: text,
@@ -48,6 +50,10 @@ export const courseSchema = z
       if (new Set(list.map((x) => x.id)).size !== list.length)
         ctx.addIssue({ code: 'custom', message: 'IDが重複しています' });
     const ids = new Set(c.chapters.map((x) => x.id));
+    const questionIds = new Set(c.questions.map((q) => q.id));
+    for (const q of c.questions)
+      if ((q.contextQuestionIds ?? []).some((id) => id === q.id || !questionIds.has(id)))
+        ctx.addIssue({ code: 'custom', message: `問題の前提参照が不正です: ${q.id}` });
     for (const q of c.questions)
       if (![q.chapterId, ...q.reviewChapterIds].every((x) => ids.has(x)))
         ctx.addIssue({ code: 'custom', message: `復習先の章が見つかりません: ${q.id}` });

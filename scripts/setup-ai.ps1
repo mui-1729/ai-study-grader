@@ -10,11 +10,27 @@ $studyPointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($studySecr
 try {
   $studyKey = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($studyPointer)
   if ([string]::IsNullOrWhiteSpace($studyKey)) { throw 'API key is empty' }
-  $studyConfig = @{ apiKey = $studyKey.Trim(); model = $studyModel.Trim() } | ConvertTo-Json
-  [IO.File]::WriteAllText((Join-Path $studyData 'ai-config.json'), $studyConfig, (New-Object Text.UTF8Encoding($false)))
+  $studyConfig = @{ apiKey = $studyKey.Trim(); model = $studyModel.Trim() } | ConvertTo-Json -Compress
+  $studyStart = New-Object Diagnostics.ProcessStartInfo
+  $studyStart.FileName = 'node'
+  $studyStart.Arguments = '--import tsx "' + (Join-Path $PSScriptRoot 'save-credential.ts') + '"'
+  $studyStart.WorkingDirectory = $studyRoot
+  $studyStart.UseShellExecute = $false
+  $studyStart.CreateNoWindow = $true
+  $studyStart.RedirectStandardInput = $true
+  $studyStart.RedirectStandardOutput = $true
+  $studyStart.RedirectStandardError = $true
+  $studyProcess = [Diagnostics.Process]::Start($studyStart)
+  $studyProcess.StandardInput.WriteLine($studyConfig)
+  $studyProcess.StandardInput.Close()
+  $studyOutput = $studyProcess.StandardOutput.ReadToEnd()
+  $studyError = $studyProcess.StandardError.ReadToEnd()
+  $studyProcess.WaitForExit()
+  if ($studyProcess.ExitCode -ne 0) { throw 'Could not protect and save the key' }
+  Write-Host $studyOutput
 } finally {
   [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($studyPointer)
   $studyKey = $null
   $studyConfig = $null
 }
-Write-Host 'Saved locally. Restart the app to apply. Do not share data/ or .env.'
+Write-Host 'Saved with Windows user encryption outside the project. Restart the app to apply.'

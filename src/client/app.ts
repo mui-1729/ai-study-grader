@@ -6,7 +6,12 @@ import DOMPurify from '/vendor/purify.js';
 import type { Course, Question } from '../schema.js';
 import type { Attempt } from '../store.js';
 import type { usageSummary } from '../usage.js';
-type PublicQuestion = Omit<Question, 'modelAnswer' | 'rubric' | 'acceptedAnswers'>;
+import type { QuestionContext } from '../question-context.js';
+import type { TutorSession } from '../tutor.js';
+import type { GenerationJob } from '../authoring.js';
+type PublicQuestion = Omit<Question, 'modelAnswer' | 'rubric' | 'acceptedAnswers'> & {
+  resolvedContext?: QuestionContext;
+};
 type PublicCourse = Omit<Course, 'questions'> & { questions: PublicQuestion[] };
 type View =
   | 'home'
@@ -17,13 +22,37 @@ type View =
   | 'settings'
   | 'import'
   | 'editor'
-  | 'usage';
+  | 'usage'
+  | 'tutor'
+  | 'generation';
+type GenerationSummary = Omit<GenerationJob, 'selected'> & {
+  plannedCalls: number;
+  draft?: Course | null;
+};
+type GenerationPlan = {
+  totalUnits: number;
+  totalCharacters: number;
+  units: { chapterId: string; title: string; start: number; end: number; characters: number }[];
+  jobs: GenerationSummary[];
+};
+let tutorSession: TutorSession | null = null,
+  tutorSessions: TutorSession[] = [],
+  tutorInput = '';
+let generationPlan: GenerationPlan | null = null,
+  generationJob: GenerationSummary | null = null;
+let generationPoll: number | undefined;
 let usageData: ReturnType<typeof usageSummary> | null = null;
 let materialPromptText = '';
 let gradingError = '';
 let courses: PublicCourse[] = [],
   history: Attempt[] = [],
-  status: { aiConfigured: boolean; model: string; token: string; appVersion?: string } = {
+  status: {
+    aiConfigured: boolean;
+    model: string;
+    token: string;
+    appVersion?: string;
+    credentialStorage?: string;
+  } = {
     aiConfigured: false,
     model: 'gpt-6-luna',
     token: '',
@@ -95,7 +124,64 @@ function render() {
     error.textContent = gradingError;
     document.querySelector('.paper')?.append(error);
   }
+  if (view === 'question') {
+    const context = question()?.resolvedContext;
+    if (context && (context.text || context.questions.length || context.warnings.length)) {
+      const section = document.createElement('section');
+      section.className = 'question-context';
+      section.setAttribute('aria-label', 'この問題の前提');
+      section.innerHTML = `<h3>この問題の前提</h3>${context.text ? md(context.text) : ''}${context.questions.map((q) => `<details open><summary>${esc(q.title)}の条件</summary>${md(q.prompt)}</details>`).join('')}${context.warnings.map((w) => `<p class="hint warn">${esc(w)}</p>`).join('')}`;
+      document.querySelector('label[for="answer"]')?.insertAdjacentElement('beforebegin', section);
+    }
+  }
+  if (view === 'study') {
+    const button = document.createElement('button');
+    button.textContent = 'この資料からAI教材を作る';
+    button.dataset.action = 'open-generation';
+    document.querySelector('.topline')?.append(button);
+  }
+  if (view === 'question') {
+    const button = document.createElement('button');
+    button.textContent = result ? '採点について相談・質問する' : 'わからない・質問する';
+    button.dataset.action = 'open-tutor';
+    button.disabled = busy;
+    document.querySelector('.paper .actions')?.append(button);
+  }
+  if (
+    view === 'attempt' &&
+    result &&
+    courses
+      .find((c) => c.id === result!.courseId)
+      ?.questions.some((q) => q.id === result!.questionId)
+  ) {
+    const button = document.createElement('button');
+    button.textContent = 'この採点から会話を始める';
+    button.dataset.action = 'open-tutor';
+    document.querySelector('.paper')?.append(button);
+  }
   if (view === 'settings') {
+    const storage = document.createElement('p');
+    storage.className = 'hint';
+    storage.textContent =
+      status.credentialStorage === 'windows-protected'
+        ? 'キーはWindowsで暗号化し、プロジェクト外の保護領域に保存しています。毎回消す必要はありません。'
+        : status.credentialStorage === 'session'
+          ? 'この環境ではキーは起動中だけ保持します。'
+          : status.credentialStorage === 'environment'
+            ? 'キーは起動元の環境変数から設定されています。'
+            : 'キーは未設定です。';
+    document.querySelector('#settings-form')?.prepend(storage);
+    const keyHelp = document.querySelector('#api-key')?.nextElementSibling;
+    if (keyHelp)
+      keyHelp.textContent =
+        'Windowsではユーザー単位で暗号化し、プロジェクト外に保存します。画面やGitHubへキーを出しません。同じWindowsユーザーの権限を持つ処理から完全に隠せる方式ではありません。';
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.textContent = '保存したキーを削除';
+    remove.className = 'danger';
+    remove.dataset.action = 'remove-key';
+    remove.disabled = !status.aiConfigured;
+    document.querySelector('#settings-form .actions')?.append(remove);
     const version = document.createElement('p');
     version.className = 'muted';
     version.textContent = status.appVersion
@@ -106,6 +192,8 @@ function render() {
   bind();
 }
 function body(): string {
+  if (view === 'tutor') return tutorView();
+  if (view === 'generation') return generationView();
   if (view === 'usage') return usageView();
   if (view === 'home') return home();
   if (view === 'import') return importForm();
@@ -147,7 +235,7 @@ function questionView() {
   return `<button class="flat back" data-action="back-study">← 問題一覧に戻る</button><div class="breadcrumb">${esc(current().title)} / ${q.section === 'mock' ? '模擬テスト' : '確認テスト'}</div><div class="paper"><div class="question-header"><h2>${esc(q.title)}</h2><span class="tag">${q.maxPoints}点</span></div>${md(q.prompt)}<label for="answer">あなたの回答</label><textarea id="answer" rows="8" maxlength="12000" placeholder="結論だけでなく、考え方や途中式も書いてみましょう。" ${busy ? 'disabled' : ''}>${esc(answer)}</textarea><div class="word-count"><span id="count">${answer.length}</span> / 12,000文字</div><div class="answer-tools"><span id="save-status" class="save-status">回答はこのパソコンに保存します</span><div><label for="grade-model" class="inline-label">今回の採点モデル</label><select id="grade-model"><option value="${esc(status.model)}">${esc(status.model)}（標準）</option>${status.model !== 'gpt-6-luna' ? '<option value="gpt-6-luna">GPT-6 Luna</option>' : ''}${status.model !== 'gpt-6-astra' ? '<option value="gpt-6-astra">GPT-6 Astra（利用枠に注意）</option>' : ''}</select></div></div>${!status.aiConfigured ? '<p class="hint warn">AI-MOPは未設定です。解答を確認して自己採点できます。「AIの設定」から接続するとAI採点も使えます。</p>' : '<p class="hint">採点を押すと、この回答・問題・解答・関連する教材をINIAD AI-MOPへ送ります。AIの採点は学習の目安です。根拠も確認しましょう。</p>'}<div class="actions"><button class="primary" data-action="grade" ${busy || (!status.aiConfigured && q.kind !== 'exact') ? 'disabled' : ''}>${busy ? '採点しています…' : q.kind === 'exact' ? '通常の採点をする' : 'AIで採点する'}</button><button data-action="solution" ${busy ? 'disabled' : ''}>解答を見て自己採点</button></div>${solution ? `<div class="result"><h2>解答・解説</h2>${md(solution.modelAnswer)}<details><summary>採点基準</summary>${md(solution.rubric)}</details><div class="actions"><label for="self-score">自分の点数</label><input id="self-score" type="number" min="0" max="${q.maxPoints}" step="1" value="0" class="score-input"><span>/ ${q.maxPoints}点</span><button data-action="self-grade">自己採点を記録</button></div></div>` : ''}${result ? resultView(result) + `<div class="actions"><button data-action="retry">もう一度解く</button><button class="primary" data-action="next-question">次の問題へ →</button></div>` : ''}</div>`;
 }
 function resultView(a: Attempt) {
-  return `<div class="result"><div class="result-head"><div><span class="eyebrow">${esc(modeName(a.grade.mode))}</span><div class="score">${a.grade.score}<small> / ${a.grade.maxPoints}点</small></div></div><div><span class="tag">${a.grade.score === a.grade.maxPoints ? '理解できています' : '振り返ってみましょう'}</span>${a.grade.model ? `<p><small>${esc(a.grade.model)}</small></p>` : ''}</div></div>${a.grade.needsReview ? '<p class="hint warn">AIが判断の確認を勧めています。採点基準と回答を見比べてください。</p>' : ''}${md(a.grade.feedback)}${a.grade.criteria.map((c) => `<div class="criterion"><strong>${esc(c.id)} · ${c.points}点</strong>${esc(c.reason)}${c.evidence ? `<blockquote>回答の根拠：${esc(c.evidence)}</blockquote>` : ''}</div>`).join('')}<details ${a.grade.mode === 'self' ? '' : 'open'}><summary>模範解答と解説</summary>${md(a.modelAnswer)}</details><details><summary>採点基準</summary>${md(a.rubric)}</details><h3>復習するなら</h3><div class="actions">${a.reviewChapterIds
+  return `<div class="result"><div class="result-head"><div><span class="eyebrow">${esc(modeName(a.grade.mode))}</span><div class="score">${a.grade.score}<small> / ${a.grade.maxPoints}点</small></div></div><div><span class="tag">${a.grade.score === a.grade.maxPoints ? '理解できています' : '振り返ってみましょう'}</span>${a.grade.model ? `<p><small>${esc(a.grade.model)}</small></p>` : ''}</div></div>${a.grade.needsReview ? '<p class="hint warn">要確認の参考点です。教材や基準に不足がある可能性もあります。「採点について相談・質問する」から確認できます。</p>' : ''}${md(a.grade.feedback)}${a.grade.criteria.map((c) => `<div class="criterion"><strong>${esc(c.id)} · ${c.points}点</strong>${esc(c.reason)}${c.evidence ? `<blockquote>回答の根拠：${esc(c.evidence)}</blockquote>` : ''}</div>`).join('')}<details ${a.grade.mode === 'self' ? '' : 'open'}><summary>模範解答と解説</summary>${md(a.modelAnswer)}</details><details><summary>採点基準</summary>${md(a.rubric)}</details><h3>復習するなら</h3><div class="actions">${a.reviewChapterIds
     .map((id) => {
       const chapter = courses.find((c) => c.id === a.courseId)?.chapters.find((c) => c.id === id);
       return chapter
@@ -161,13 +249,100 @@ function retryButton(a: Attempt) {
     ? `<div class="actions"><button data-retry-course="${esc(a.courseId)}" data-retry-question="${esc(a.questionId)}" class="primary">この問題を解き直す →</button></div>`
     : '';
 }
+function tutorView() {
+  if (!tutorSession) return '<p>問題から相談を開いてください。</p>';
+  const session = tutorSession;
+  return `<button class="flat back" data-action="tutor-back">← 問題に戻る</button><div class="topline"><div><h1>${esc(session.questionTitle)}について相談</h1><p>「どこから考えればいい？」から聞けます。この会話は採点を変えません。</p></div><button data-action="tutor-new">新しい会話に分岐</button></div><div class="paper"><details><summary>引き継いだ問題・回答・採点</summary>${md(question()?.prompt ?? '')}${
+    question()
+      ?.resolvedContext?.questions.map((q) => `<h3>${esc(q.title)}の条件</h3>${md(q.prompt)}`)
+      .join('') ?? ''
+  }${question()?.resolvedContext?.text ? md(question().resolvedContext!.text) : ''}<h3>相談を始めた時の回答</h3>${md(session.answerSnapshot || 'まだ回答していません。')}${session.gradeSnapshot ? `<h3>採点結果（参考）</h3>${md(session.gradeSnapshot.feedback)}` : ''}</details><div aria-live="polite">${session.messages.map((m) => `<section class="tutor-message ${m.failed ? 'hint warn' : ''}"><h3>${m.role === 'user' ? 'あなた' : 'AI'}</h3>${md(m.text)}</section>`).join('') || '<p class="hint">例：何を求められているのか分かりません。小さい例から説明して。</p>'}</div><form id="tutor-form"><label for="tutor-input">聞きたいこと</label><textarea id="tutor-input" rows="4" maxlength="4000" required ${busy ? 'disabled' : ''}>${esc(tutorInput)}</textarea><p class="hint">送信すると、問題・関連教材・参考解答・相談開始時の回答・採点結果と、直近10件の会話をINIAD AI-MOPへ送ります。会話はこのパソコンに保存します。</p>${modelPicker('tutor-model')}<div class="actions"><button type="submit" class="primary" ${busy || !status.aiConfigured ? 'disabled' : ''}>${busy ? '返答を待っています…' : '質問を送る'}</button>${!status.aiConfigured ? '<button type="button" data-view="settings">AIの設定を開く</button>' : ''}</div></form></div><details class="paper"><summary>この問題の相談履歴（${tutorSessions.length}件）</summary>${tutorSessions.map((s) => `<p><button data-tutor-session="${esc(s.id)}">${new Date(s.createdAt).toLocaleString('ja-JP')} · ${s.messages.length}件のメッセージ</button></p>`).join('')}</details>`;
+}
+function modelPicker(id: string) {
+  return `<label for="${id}">今回のモデル</label><select id="${id}">${[...new Set([status.model, 'gpt-6-luna', 'gpt-6-astra'])].map((model) => `<option value="${esc(model)}">${esc(model)}${model.includes('astra') ? '（利用枠に注意）' : ''}</option>`).join('')}</select>`;
+}
+function generationView() {
+  if (!generationPlan || !current()) return '<p>資料から教材作成を開いてください。</p>';
+  const plan = generationPlan,
+    job = generationJob;
+  const stateName = {
+    running: '生成中',
+    completed: '選択範囲の生成完了',
+    failed: '途中で停止',
+    cancelled: '停止済み',
+    interrupted: 'アプリ終了により中断',
+  };
+  return `<button class="flat back" data-view="study">← 元資料に戻る</button><h1>元資料から教材を作る</h1><div class="paper form"><h2>${esc(current().title)}</h2><p>本文 ${plan.totalCharacters.toLocaleString()}文字・全${plan.totalUnits}区間。1区間につきAIを1回呼び出し、解説・確認問題・参考解答・採点基準を作ります。</p><p class="hint">利用枠の正確な残量は自動取得できません。まず少ない回数で確認してください。上限に達すると停止し、成功した区間を残します。画像・図表を読み直す機能はなく、取り込んだ本文だけを使います。</p><form id="generation-form"><label for="generation-start">開始する区間</label><input id="generation-start" type="number" min="1" max="${plan.totalUnits}" value="1" required><label for="generation-calls">今回生成する区間数（開始区間から順番）</label><input id="generation-calls" type="number" min="1" max="${Math.min(20, plan.totalUnits)}" value="${Math.min(3, plan.totalUnits)}" required><p id="generation-scope" class="hint"></p>${modelPicker('generation-model')}<p class="hint">「教材を生成」を押すと、選択した範囲の本文をINIAD AI-MOPへ送信します。1回の出力上限は6,144トークン。これは消費量の予測やquotaの保証ではありません。元資料はそのまま残ります。</p><button class="primary" type="submit" ${job?.state === 'running' || !status.aiConfigured ? 'disabled' : ''}>教材を生成</button>${!status.aiConfigured ? '<button type="button" data-view="settings">AIの設定を開く</button>' : ''}</form></div>${
+    job
+      ? `<section class="paper" aria-live="polite"><h2>${stateName[job.state]} · ${job.completed.length}/${job.plannedCalls}回</h2><p>この結果では元資料の${(job.startUnit ?? 0) + 1}区間目から ${job.completed.length}/${job.totalUnits}区間を教材化しています。${job.completed.length < job.totalUnits ? '未生成の範囲があります。' : ''}</p>${job.error ? `<p role="alert" class="hint warn">${esc(job.error)}</p>` : ''}${job.state === 'running' ? `<p>画面を閉じてもアプリが動いていれば処理は続きます。</p><button data-action="generation-cancel" ${job.cancelRequested ? 'disabled' : ''}>${job.cancelRequested ? '停止を待っています' : '次の呼び出しから停止'}</button>` : ''}${
+          job.draft
+            ? `<h3>生成内容を確認</h3><p class="hint">AIの誤りが含まれることがあります。説明・解答・配点を元資料と照合してください。登録後の問題からAIにも質問できます。</p>${job.draft.chapters
+                .map(
+                  (ch) =>
+                    `<details><summary>${esc(ch.title)}</summary>${md(ch.content)}${job
+                      .draft!.questions.filter((q) => q.chapterId === ch.id)
+                      .map(
+                        (q) =>
+                          `<h4>${esc(q.title)} · ${q.maxPoints}点</h4>${md(q.prompt)}<details><summary>解答・採点基準</summary>${md(q.modelAnswer)}${md(q.rubric)}</details>`,
+                      )
+                      .join('')}</details>`,
+                )
+                .join(
+                  '',
+                )}${job.state !== 'running' ? `<button class="primary" data-action="generation-register">${job.registeredCourseId ? '登録した教材を開く' : '確認した内容を新しい教材として登録'}</button>` : ''}`
+            : ''
+        }</section>`
+      : ''
+  }<details class="paper"><summary>作成履歴</summary>${plan.jobs.map((j) => `<p><button data-generation-job="${esc(j.id)}">${new Date(j.createdAt).toLocaleString('ja-JP')} · ${stateName[j.state]} · ${j.completed.length}区間</button></p>`).join('') || '<p>まだありません。</p>'}</details>`;
+}
+async function refreshGeneration() {
+  if (!generationJob) return;
+  generationJob = await api<GenerationSummary>(`/generation/${generationJob.id}`);
+  if (view === 'generation') render();
+  clearTimeout(generationPoll);
+  if (generationJob.state === 'running')
+    generationPoll = window.setTimeout(() => {
+      void run(refreshGeneration);
+    }, 1500);
+}
+async function startTutor(forceNew = false) {
+  await saveAnswer();
+  if (view === 'attempt' && result) {
+    courseId = result.courseId;
+    questionId = result.questionId;
+  }
+  tutorSessions = await api<TutorSession[]>(`/tutor/${courseId}/${questionId}`);
+  const matching = tutorSessions.find((s) =>
+    result ? s.attemptId === result.id : !s.attemptId && s.answerSnapshot === answer,
+  );
+  tutorSession =
+    !forceNew && matching
+      ? matching
+      : await api<TutorSession>('/tutor', {
+          method: 'POST',
+          body: JSON.stringify({
+            courseId,
+            questionId,
+            answer,
+            ...(forceNew && view === 'tutor' && tutorSession
+              ? { parentSessionId: tutorSession.id }
+              : {}),
+            ...(result ? { attemptId: result.id } : {}),
+          }),
+        });
+  tutorSessions = await api(`/tutor/${courseId}/${questionId}`);
+  tutorInput = '';
+  view = 'tutor';
+  render();
+  window.scrollTo(0, 0);
+}
 function usageView() {
   const data = usageData;
   if (!data) return '<p>利用状況を読み込めませんでした。</p>';
   const quota = data.quota,
     fmt = (n: number) => n.toLocaleString('ja-JP');
   const limits = data.lastLimits;
-  return `<div class="topline"><div><span class="eyebrow">DAILY AI USAGE</span><h1>AI-MOPの利用状況</h1><p>日ごとの確認値と、このアプリで使った量。</p></div><button data-action="refresh-usage">表示を更新</button></div><div class="grid"><div class="card"><span class="tag ${quota?.isToday ? '' : 'warn'}">${quota?.isToday ? '今日のquota確認値' : quota ? '前回の確認値（本日ではありません）' : 'quota未確認'}</span><p class="quota-number">${quota ? fmt(quota.remaining) : '—'}<small> 残り</small></p><p class="muted">${quota ? `確認日時：${new Date(quota.observedAt).toLocaleString('ja-JP')}<br>${esc(quota.note)}` : '対話画面でquotaを実行し、表示された残量を下に記録できます。'}</p><p class="hint">${quota?.isToday ? '最後にquotaで確認した時点の値です。現在の残量を自動取得した表示ではありません。' : '今日の残量は未確認です。日付が変わっても、この値を自動補充しません。'}</p></div><div class="card"><span class="eyebrow">このアプリの本日の使用量</span><p class="quota-number">${fmt(data.totalTokens)}<small> tokens</small></p><p class="muted">AIへの採点リクエスト ${data.requests}回<br>${data.unreported ? `使用トークン数が返らなかった処理 ${data.unreported}回` : 'トークン数が返った処理の合計です。'}</p><p class="hint">Slackや他のアプリでの使用は含みません。AI-MOP側の換算方法が未確認のため、quota確認値から単純に差し引きません。</p></div></div><div class="paper form usage-form"><h2>quotaの残量を記録する</h2><p class="muted">対話画面でquotaと送り、表示された日次残量を入力します。毎日の固定上限としては保存しません。</p><form id="quota-form"><label for="quota-remaining">今回quotaで確認した残量</label><input id="quota-remaining" type="number" min="0" step="1" max="9007199254740991" placeholder="quotaに表示された数値" required><button class="primary" type="submit">今の確認値として記録</button></form></div><div class="paper usage-form"><h2>今日のモデル別使用量</h2>${data.models.length ? `<div class="markdown"><table><thead><tr><th>モデル</th><th>採点要求</th><th>入力</th><th>出力</th><th>合計</th></tr></thead><tbody>${data.models.map((m) => `<tr><td>${esc(m.model)}</td><td>${m.requests}回</td><td>${fmt(m.inputTokens)}</td><td>${fmt(m.outputTokens)}</td><td>${fmt(m.totalTokens)}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">今日はまだ、このアプリからAI採点を呼び出していません。</p>'}<small>日付は日本時間の ${esc(data.today)}。AI-MOP側の実際のリセット時刻やモデル別換算は未確認です。失敗した処理も採点要求の回数に含めます。</small>${
+  return `<div class="topline"><div><span class="eyebrow">DAILY AI USAGE</span><h1>AI-MOPの利用状況</h1><p>日ごとの確認値と、このアプリで使った量。</p></div><button data-action="refresh-usage">表示を更新</button></div><div class="grid"><div class="card"><span class="tag ${quota?.isToday ? '' : 'warn'}">${quota?.isToday ? '今日のquota確認値' : quota ? '前回の確認値（本日ではありません）' : 'quota未確認'}</span><p class="quota-number">${quota ? fmt(quota.remaining) : '—'}<small> 残り</small></p><p class="muted">${quota ? `確認日時：${new Date(quota.observedAt).toLocaleString('ja-JP')}<br>${esc(quota.note)}` : '対話画面でquotaを実行し、表示された残量を下に記録できます。'}</p><p class="hint">${quota?.isToday ? '最後にquotaで確認した時点の値です。現在の残量を自動取得した表示ではありません。' : '今日の残量は未確認です。日付が変わっても、この値を自動補充しません。'}</p></div><div class="card"><span class="eyebrow">このアプリの本日の使用量</span><p class="quota-number">${fmt(data.totalTokens)}<small> tokens</small></p><p class="muted">AI呼び出し ${data.requests}回<br>${data.unreported ? `使用トークン数が返らなかった処理 ${data.unreported}回` : 'トークン数が返った処理の合計です。'}</p><p class="hint">Slackや他のアプリでの使用は含みません。AI-MOP側の換算方法が未確認のため、quota確認値から単純に差し引きません。</p></div></div><div class="paper form usage-form"><h2>quotaの残量を記録する</h2><p class="muted">対話画面でquotaと送り、表示された日次残量を入力します。毎日の固定上限としては保存しません。</p><form id="quota-form"><label for="quota-remaining">今回quotaで確認した残量</label><input id="quota-remaining" type="number" min="0" step="1" max="9007199254740991" placeholder="quotaに表示された数値" required><button class="primary" type="submit">今の確認値として記録</button></form></div><div class="paper usage-form"><h2>今日のモデル別使用量</h2>${data.models.length ? `<div class="markdown"><table><thead><tr><th>モデル</th><th>AI呼び出し</th><th>入力</th><th>出力</th><th>合計</th></tr></thead><tbody>${data.models.map((m) => `<tr><td>${esc(m.model)}</td><td>${m.requests}回</td><td>${fmt(m.inputTokens)}</td><td>${fmt(m.outputTokens)}</td><td>${fmt(m.totalTokens)}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">今日はまだ、このアプリからAIを呼び出していません。</p>'}<small>日付は日本時間の ${esc(data.today)}。AI-MOP側の実際のリセット時刻やモデル別換算は未確認です。失敗した処理もAI呼び出しの回数に含めます。</small>${
     limits
       ? `<details><summary>APIの応答に含まれた短時間の制限情報</summary><p class="muted">${new Date(limits.createdAt).toLocaleString('ja-JP')} · ${esc(limits.model)} の応答時点です。日次quotaとは別の値である可能性があります。対象期間・共有範囲は未確認です。</p>${Object.entries(
           limits.limits,
@@ -199,10 +374,10 @@ function materialPromptPanel() {
   </section>`;
 }
 function importForm() {
-  return `<div class="topline"><div><span class="eyebrow">BUILD YOUR LIBRARY</span><h1>学びたい教材を追加する</h1><p>科目を問わず、使いたい教材を何度でも。</p></div></div>${materialPromptPanel()}<div class="paper form"><span class="eyebrow">STEP 2 · 教材を取り込む</span><h2>完成した教材を追加する</h2><form id="import-form"><label for="material-title">教材の名前</label><input id="material-title" name="title" placeholder="例：統計学 第1回"><label for="material-file">教材ファイル</label><input id="material-file" name="file" type="file" accept=".pdf,.md,.txt,.json" required><p class="muted">PDF・Markdown・テキスト、または問題付き教材パッケージ（JSON）。1ファイル15MBまで。</p><p class="hint">問題付きのJSONなら、そのまま学習・採点を始められます。本文だけのファイルは、まず読むための教材として追加します。問題・解答・採点基準は後から追加できます。</p><p class="hint">PDFは文字を取り出せるものに対応します。画像だけのPDF、図表や数式の配置は正確に読み取れない場合があるため、追加後に本文を確認してください。元ファイルは変更しません。</p><button class="primary" type="submit">この教材を追加する</button></form></div>`;
+  return `<div class="topline"><div><span class="eyebrow">BUILD YOUR LIBRARY</span><h1>学びたい教材を追加する</h1><p>科目を問わず、使いたい教材を何度でも。</p></div></div>${materialPromptPanel()}<div class="paper form"><span class="eyebrow">STEP 2 · 教材を取り込む</span><h2>元資料・完成した教材を追加する</h2><form id="import-form"><label for="material-title">教材の名前</label><input id="material-title" name="title" placeholder="例：統計学 第1回"><label for="material-file">教材ファイル</label><input id="material-file" name="file" type="file" accept=".pdf,.md,.txt,.json" required><p class="muted">PDF・Markdown・テキスト、または問題付き教材パッケージ（JSON）。1ファイル15MBまで。</p><p class="hint">問題付きのJSONなら、そのまま学習・採点を始められます。本文だけのファイルは、まず読むための教材として追加します。追加後に「この資料からAI教材を作る」で、解説・問題・解答・採点基準をまとめて生成できます。</p><p class="hint">PDFは文字を取り出せるものに対応します。画像だけのPDF、図表や数式の配置は正確に読み取れない場合があるため、追加後に本文を確認してください。元ファイルは変更しません。</p><button class="primary" type="submit">この教材を追加する</button></form></div>`;
 }
 function settings() {
-  return `<div class="topline"><div><span class="eyebrow">AI CONNECTION</span><h1>INIAD AI-MOPの設定</h1><p>普段はLuna、必要なときにAstra。</p></div></div><div class="paper form"><span class="tag ${status.aiConfigured ? '' : 'warn'}">${status.aiConfigured ? '鍵を設定済み（接続は未確認）' : '未設定'}</span><form id="settings-form"><label for="api-key">AI-MOPのAPIキー</label><input id="api-key" type="password" autocomplete="off" placeholder="${status.aiConfigured ? '変更するときだけ入力' : 'ご自身のパソコンで入力してください'}" ${status.aiConfigured ? '' : 'required'}><small>入力した鍵は、このパソコンのアプリ専用フォルダーに保存します。画面への再表示やGitHubへの登録はしません。</small><label for="model-name">標準のモデル名</label><input id="model-name" list="model-options" value="${esc(status.model)}" required pattern="[a-zA-Z0-9._:/\-]+"><datalist id="model-options"><option value="gpt-6-luna"><option value="gpt-6-astra"></datalist><p><small>AI-MOPで利用できる正式な名前を指定します。Lunaを普段の採点に使い、必要な問題だけAstraを選べます。</small></p><div class="actions"><button type="submit" class="primary">設定を保存</button><button type="button" data-action="models" ${status.aiConfigured ? '' : 'disabled'}>利用できるモデルを確認</button></div><p id="model-result" class="hint" hidden></p></form><div class="settings-separator"><h3>利用枠を大切に使うために</h3><p class="muted">1問ずつ採点し、過去の会話全体は送りません。失敗した処理は自動で再送しません。残りの利用枠はAI-MOP側で確認してください。</p><small>このアプリは自分のパソコン専用です。共有・公開して使う機能は初期版には含まれません。</small></div></div>`;
+  return `<div class="topline"><div><span class="eyebrow">AI CONNECTION</span><h1>INIAD AI-MOPの設定</h1><p>普段はLuna、必要なときにAstra。</p></div></div><div class="paper form"><span class="tag ${status.aiConfigured ? '' : 'warn'}">${status.aiConfigured ? '鍵を設定済み（接続は未確認）' : '未設定'}</span><form id="settings-form"><label for="api-key">AI-MOPのAPIキー</label><input id="api-key" type="password" autocomplete="off" placeholder="${status.aiConfigured ? '変更するときだけ入力' : 'ご自身のパソコンで入力してください'}" ${status.aiConfigured ? '' : 'required'}><small>Windowsではユーザー単位で暗号化し、プロジェクト外に保存します。画面やGitHubへキーを出しません。</small><label for="model-name">標準のモデル名</label><input id="model-name" list="model-options" value="${esc(status.model)}" required pattern="[a-zA-Z0-9._:/\-]+"><datalist id="model-options"><option value="gpt-6-luna"><option value="gpt-6-astra"></datalist><p><small>AI-MOPで利用できる正式な名前を指定します。Lunaを普段の採点に使い、必要な問題だけAstraを選べます。</small></p><div class="actions"><button type="submit" class="primary">設定を保存</button><button type="button" data-action="models" ${status.aiConfigured ? '' : 'disabled'}>利用できるモデルを確認</button></div><p id="model-result" class="hint" hidden></p></form><div class="settings-separator"><h3>利用枠を大切に使うために</h3><p class="muted">1問ずつ採点し、過去の会話全体は送りません。失敗した処理は自動で再送しません。残りの利用枠はAI-MOP側で確認してください。</p><small>このアプリは自分のパソコン専用です。共有・公開して使う機能は初期版には含まれません。</small></div></div>`;
 }
 function editor() {
   const c = current();
@@ -235,6 +410,88 @@ async function openQuestion(id: string, fresh = false) {
   window.scrollTo(0, 0);
 }
 function bind() {
+  document.querySelectorAll<HTMLElement>('[data-tutor-session]').forEach(
+    (el) =>
+      (el.onclick = () => {
+        if (busy) return;
+        tutorSession = tutorSessions.find((s) => s.id === el.dataset.tutorSession)!;
+        tutorInput = '';
+        render();
+      }),
+  );
+  document.querySelectorAll<HTMLElement>('[data-generation-job]').forEach(
+    (el) =>
+      (el.onclick = () =>
+        run(async () => {
+          generationJob = await api(`/generation/${el.dataset.generationJob}`);
+          await refreshGeneration();
+        })),
+  );
+  const tutorInputEl = document.querySelector<HTMLTextAreaElement>('#tutor-input');
+  if (tutorInputEl)
+    tutorInputEl.oninput = () => {
+      tutorInput = tutorInputEl.value;
+    };
+  const tutorForm = document.querySelector<HTMLFormElement>('#tutor-form');
+  if (tutorForm)
+    tutorForm.onsubmit = (e) => {
+      e.preventDefault();
+      void run(async () => {
+        const text = tutorInput.trim();
+        if (!text || !tutorSession) return;
+        const model = document.querySelector<HTMLSelectElement>('#tutor-model')!.value;
+        busy = true;
+        render();
+        try {
+          tutorSession = await api(`/tutor/${tutorSession.id}/message`, {
+            method: 'POST',
+            body: JSON.stringify({ text, model }),
+          });
+          tutorInput = '';
+          tutorSessions = await api(`/tutor/${courseId}/${questionId}`);
+        } finally {
+          busy = false;
+          render();
+        }
+        document.querySelector('#tutor-form')?.scrollIntoView({ block: 'end' });
+      });
+    };
+  const generationForm = document.querySelector<HTMLFormElement>('#generation-form');
+  if (generationForm) {
+    const calls = document.querySelector<HTMLInputElement>('#generation-calls')!;
+    const start = document.querySelector<HTMLInputElement>('#generation-start')!;
+    const updateScope = () => {
+      const startUnit = Math.max(0, Number(start.value) - 1);
+      const units = generationPlan!.units.slice(startUnit, startUnit + Number(calls.value));
+      const last = units.at(-1);
+      document.querySelector('#generation-scope')!.textContent =
+        `最大${units.length}回の呼び出し・本文${units.reduce((s, u) => s + u.characters, 0).toLocaleString()}文字を送信。範囲：第${start.value}区間〜${last?.title ?? ''}の${last?.end ?? 0}文字目。`;
+    };
+    start.oninput = updateScope;
+    calls.oninput = updateScope;
+    updateScope();
+    generationForm.onsubmit = (e) => {
+      e.preventDefault();
+      void run(async () => {
+        const maxCalls = Number(calls.value),
+          model = document.querySelector<HTMLSelectElement>('#generation-model')!.value;
+        const button = generationForm.querySelector<HTMLButtonElement>('button[type=submit]')!;
+        button.disabled = true;
+        try {
+          const started = await api<{ id: string }>('/generation', {
+            method: 'POST',
+            body: JSON.stringify({ courseId, maxCalls, model, startUnit: Number(start.value) - 1 }),
+          });
+          generationJob = await api(`/generation/${started.id}`);
+          generationPlan = await api(`/generation/plan/${courseId}`);
+          await refreshGeneration();
+        } finally {
+          button.disabled = false;
+        }
+      });
+    };
+  }
+
   const quotaForm = document.querySelector<HTMLFormElement>('#quota-form');
   if (quotaForm)
     quotaForm.onsubmit = (e) => {
@@ -425,6 +682,50 @@ function scheduleSave() {
   }, 700);
 }
 async function action(name: string) {
+  if (name === 'open-tutor' || name === 'tutor-new') {
+    await startTutor(name === 'tutor-new');
+    return;
+  }
+  if (name === 'tutor-back') {
+    await openQuestion(questionId);
+    return;
+  }
+  if (name === 'open-generation') {
+    generationPlan = await api(`/generation/plan/${courseId}`);
+    generationJob = null;
+    view = 'generation';
+    render();
+    if (generationPlan!.jobs[0]) {
+      generationJob = await api(`/generation/${generationPlan!.jobs[0].id}`);
+      await refreshGeneration();
+    }
+    return;
+  }
+  if (name === 'generation-cancel' && generationJob) {
+    await api(`/generation/${generationJob.id}/cancel`, { method: 'POST' });
+    await refreshGeneration();
+    return;
+  }
+  if (name === 'generation-register' && generationJob) {
+    const registered = await api<{ id: string }>(`/generation/${generationJob.id}/register`, {
+      method: 'POST',
+    });
+    await reload();
+    courseId = registered.id;
+    chapterId = current().chapters[0]!.id;
+    tab = 'read';
+    view = 'study';
+    render();
+    return;
+  }
+
+  if (name === 'remove-key') {
+    await api('/settings/key', { method: 'DELETE' });
+    await reload();
+    render();
+    notice('保存したキーと、このアプリのメモリ上のキーを削除しました。');
+    return;
+  }
   if (name === 'copy-material-prompt' || name === 'show-material-prompt') {
     if (!materialPromptText)
       materialPromptText = (await api<{ prompt: string }>('/material-prompt')).prompt;

@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { APICallError } from 'ai';
 import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { resolve, join } from 'node:path';
-import { randomBytes, createHash } from 'node:crypto';
+import { randomBytes, createHash, randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { z } from 'zod';
 import multer from 'multer';
@@ -14,13 +14,34 @@ import { loadConfig, saveConfig, INIAD_BASE_URL } from './config.js';
 import { extractMaterial, materialCourse, persistCourse } from './materials.js';
 import { usageSummary } from './usage.js';
 import { acquireDataLock } from './runtime-lock.js';
-export function createApp(dataDir = resolve('data')) {
+import { defaultCredentialVault, type CredentialVault } from './credentials.js';
+import { resolveQuestionContext } from './question-context.js';
+import { tutorReply, newTutorMessage, type TutorSession } from './tutor.js';
+import {
+  authorUnit,
+  sourceUnits,
+  newGeneration,
+  generationDraft,
+  type GenerationJob,
+} from './authoring.js';
+export function createApp(
+  dataDir = resolve('data'),
+  options: { credentialVault?: CredentialVault } = {},
+) {
   mkdirSync(dataDir, { recursive: true });
   const coursesDir = join(dataDir, 'courses');
   const courses = loadCourses(coursesDir),
     store = new Store(join(dataDir, 'study.sqlite'));
-  let config = loadConfig(dataDir);
+  const vault = options.credentialVault ?? defaultCredentialVault(dataDir);
+  let config = loadConfig(dataDir, vault);
   let busy = false;
+  // A restart must never silently re-send a paid request.
+  for (const job of store.generations<GenerationJob>()) {
+    if (job.state === 'running') {
+      job.state = 'interrupted';
+      store.saveGeneration(job);
+    }
+  }
   const csrf = randomBytes(32).toString('hex');
   const app = express();
   app.disable('x-powered-by');
@@ -59,7 +80,8 @@ export function createApp(dataDir = resolve('data')) {
   app.get('/api/status', (_req, res) =>
     res.json({
       aiConfigured: Boolean(config.apiKey),
-      appVersion: '2026.11.06.1',
+      appVersion: '2026.11.06.2',
+      credentialStorage: config.credentialStorage,
       provider: 'INIAD AI-MOP',
       model: config.model,
       token: csrf,
@@ -73,7 +95,15 @@ export function createApp(dataDir = resolve('data')) {
       })
       .strict()
       .parse(req.body);
-    config = saveConfig(dataDir, { apiKey: body.apiKey ?? config.apiKey, model: body.model });
+    config = saveConfig(
+      dataDir,
+      { apiKey: body.apiKey ?? config.apiKey, model: body.model },
+      vault,
+    );
+    res.json({ saved: true });
+  });
+  app.delete('/api/settings/key', (_req, res) => {
+    config = saveConfig(dataDir, { apiKey: '', model: config.model }, vault);
     res.json({ saved: true });
   });
   app.get('/api/usage', (_req, res) => res.json(usageSummary(store.usages(), store.quota())));
@@ -159,9 +189,10 @@ export function createApp(dataDir = resolve('data')) {
     res.json(
       courses.map((c) => ({
         ...c,
-        questions: c.questions.map(
-          ({ modelAnswer: _, rubric: __, acceptedAnswers: ___, ...q }) => q,
-        ),
+        questions: c.questions.map((original) => {
+          const { modelAnswer: _, rubric: __, acceptedAnswers: ___, ...q } = original;
+          return { ...q, resolvedContext: resolveQuestionContext(c, original) };
+        }),
       })),
     ),
   );
@@ -176,6 +207,221 @@ export function createApp(dataDir = resolve('data')) {
       key: `${course.id}:${createHash('sha256').update(JSON.stringify(question)).digest('hex')}:${question.id}`,
     };
   };
+  app.get('/api/generation/plan/:courseId', (req, res) => {
+    const course = courses.find((c) => c.id === req.params.courseId);
+    if (!course) return void res.status(404).json({ error: '教材が見つかりません。' });
+    const units = sourceUnits(course);
+    res.json({
+      totalUnits: units.length,
+      totalCharacters: units.reduce((s, u) => s + u.text.length, 0),
+      units: units.map(({ text, ...u }) => ({ ...u, characters: text.length })),
+      jobs: store
+        .generations<GenerationJob>()
+        .filter((j) => j.sourceCourseId === course.id)
+        .map(({ selected, ...j }) => ({ ...j, plannedCalls: selected.length })),
+    });
+  });
+  app.get('/api/generation/:id', (req, res) => {
+    const job = store.generation<GenerationJob>(req.params.id);
+    if (!job) return void res.status(404).json({ error: '生成履歴が見つかりません。' });
+    const { selected, ...summary } = job;
+    res.json({
+      ...summary,
+      plannedCalls: selected.length,
+      draft: job.completed.length ? generationDraft(job) : null,
+    });
+  });
+  app.post('/api/generation', (req, res) => {
+    const body = z
+      .object({
+        courseId: z.string(),
+        maxCalls: z.number().int().min(1).max(20),
+        startUnit: z.number().int().nonnegative().default(0),
+        model: z
+          .string()
+          .regex(/^[a-zA-Z0-9._:/-]{1,100}$/)
+          .optional(),
+      })
+      .strict()
+      .parse(req.body);
+    if (busy) return void res.status(429).json({ error: '別のAI処理が進行中です。' });
+    if (!config.apiKey)
+      return void res.status(503).json({ error: '先にAIの設定からキーを入力してください。' });
+    const course = courses.find((c) => c.id === body.courseId);
+    if (!course) return void res.status(404).json({ error: '教材が見つかりません。' });
+    if (body.startUnit >= sourceUnits(course).length)
+      return void res.status(400).json({ error: '生成する開始区間を確認してください。' });
+    const job = newGeneration(course, body.maxCalls, body.model ?? config.model, body.startUnit);
+    store.saveGeneration(job);
+    busy = true;
+    res.status(202).json({ id: job.id });
+    void (async () => {
+      try {
+        for (const unit of job.selected) {
+          if (job.cancelRequested) {
+            job.state = 'cancelled';
+            break;
+          }
+          if (!config.apiKey) throw new Error('missing_key');
+          const usageId = store.startUsage(job.model, {
+            courseId: course.id,
+            purpose: 'authoring',
+          });
+          try {
+            job.completed.push(
+              await authorUnit(unit, { ...config, model: job.model }, (e) =>
+                store.updateUsage(usageId, e),
+              ),
+            );
+            store.updateUsage(usageId, {}, 'completed');
+            store.saveGeneration(job);
+          } catch (error) {
+            store.updateUsage(
+              usageId,
+              {
+                failureCode: error instanceof GradingResponseError ? error.code : 'authoring_error',
+              },
+              'failed',
+            );
+            throw error;
+          }
+        }
+        if (job.state === 'running') job.state = job.cancelRequested ? 'cancelled' : 'completed';
+      } catch {
+        job.state = 'failed';
+        job.error =
+          '教材生成を完了できませんでした。利用枠・接続・AIの出力形式を確認してください。成功した区間は残しています。自動再送はしていません。';
+      } finally {
+        busy = false;
+        store.saveGeneration(job);
+      }
+    })();
+    activeGeneration = job;
+  });
+  let activeGeneration: GenerationJob | undefined;
+  app.post('/api/generation/:id/cancel', (req, res) => {
+    if (activeGeneration?.id === req.params.id && activeGeneration.state === 'running') {
+      activeGeneration.cancelRequested = true;
+      store.saveGeneration(activeGeneration);
+    }
+    res.json({ saved: true });
+  });
+  app.post('/api/generation/:id/register', (req, res) => {
+    const job = store.generation<GenerationJob>(req.params.id);
+    if (!job) return void res.status(404).json({ error: '生成履歴が見つかりません。' });
+    if (job.registeredCourseId) return void res.json({ id: job.registeredCourseId });
+    if (job.state === 'running' || !job.completed.length)
+      return void res.status(409).json({ error: '生成済みの教材を確認してから登録してください。' });
+    const draft = generationDraft(job);
+    // Idempotent even when the process stopped between writing the course and saving the job.
+    if (!courses.some((c) => c.id === draft.id)) courses.push(persistCourse(coursesDir, draft));
+    job.registeredCourseId = draft.id;
+    store.saveGeneration(job);
+    res.status(201).json({ id: draft.id });
+  });
+  app.get('/api/tutor/:courseId/:questionId', (req, res) =>
+    res.json(store.tutors(req.params.courseId, req.params.questionId)),
+  );
+  app.post('/api/tutor', (req, res) => {
+    const body = z
+      .object({
+        courseId: z.string(),
+        questionId: z.string(),
+        answer: z.string().max(12000).default(''),
+        attemptId: z.string().optional(),
+        parentSessionId: z.string().optional(),
+      })
+      .strict()
+      .parse(req.body);
+    const { course, question } = lookup(body.courseId, body.questionId);
+    const parent = body.parentSessionId ? store.tutor(body.parentSessionId) : undefined;
+    if (
+      body.parentSessionId &&
+      (!parent || parent.courseId !== course.id || parent.questionId !== question.id)
+    )
+      return void res.status(400).json({ error: '分岐元の会話を確認できません。' });
+    const attemptId = parent?.attemptId ?? body.attemptId;
+    const attempt = attemptId ? store.attempt(attemptId) : undefined;
+    if (
+      attemptId &&
+      (!attempt || attempt.courseId !== course.id || attempt.questionId !== question.id)
+    )
+      return void res.status(400).json({ error: '相談元の採点結果を確認できません。' });
+    const now = new Date().toISOString();
+    const session: TutorSession = {
+      id: randomUUID(),
+      courseId: course.id,
+      questionId: question.id,
+      questionTitle: question.title,
+      createdAt: now,
+      updatedAt: now,
+      answerSnapshot: parent?.answerSnapshot ?? attempt?.answer ?? body.answer,
+      messages: parent ? structuredClone(parent.messages) : [],
+      ...(parent ? { parentSessionId: parent.id } : {}),
+      ...(attempt ? { attemptId: attempt.id, gradeSnapshot: attempt.grade } : {}),
+    };
+    store.saveTutor(session);
+    res.status(201).json(session);
+  });
+  app.post('/api/tutor/:id/message', async (req, res) => {
+    const body = z
+      .object({
+        text: z.string().trim().min(1).max(4000),
+        model: z
+          .string()
+          .regex(/^[a-zA-Z0-9._:/-]{1,100}$/)
+          .optional(),
+      })
+      .strict()
+      .parse(req.body);
+    const session = store.tutor(req.params.id);
+    if (!session) return void res.status(404).json({ error: '相談の会話が見つかりません。' });
+    if (busy)
+      return void res
+        .status(429)
+        .json({ error: '別のAI処理が進行中です。完了後に送信してください。' });
+    if (!config.apiKey)
+      return void res.status(503).json({ error: 'AIの設定からキーを入力してください。' });
+    const { course, question: q } = lookup(session.courseId, session.questionId);
+    session.messages.push(newTutorMessage('user', body.text));
+    session.updatedAt = new Date().toISOString();
+    store.saveTutor(session);
+    busy = true;
+    const usageId = store.startUsage(body.model ?? config.model, {
+      courseId: course.id,
+      questionId: q.id,
+      purpose: 'tutoring',
+    });
+    try {
+      const reply = await tutorReply(
+        course,
+        q,
+        session,
+        { ...config, model: body.model ?? config.model },
+        (e) => store.updateUsage(usageId, e),
+      );
+      session.messages.push(newTutorMessage('assistant', reply));
+      store.updateUsage(usageId, {}, 'completed');
+    } catch (error) {
+      store.updateUsage(
+        usageId,
+        { failureCode: error instanceof GradingResponseError ? error.code : 'tutor_error' },
+        'failed',
+      );
+      session.messages.push(
+        newTutorMessage(
+          'assistant',
+          'AIとの相談を完了できませんでした。利用枠や接続設定を確認してください。自動再送はしていません。',
+          true,
+        ),
+      );
+    } finally {
+      busy = false;
+      session.updatedAt = new Date().toISOString();
+      store.saveTutor(session);
+    }
+    res.json(session);
+  });
   app.get('/api/draft/:courseId/:questionId', (req, res) => {
     const { key } = lookup(req.params.courseId, req.params.questionId);
     res.json({ answer: store.draft(key) });
@@ -214,6 +460,12 @@ export function createApp(dataDir = resolve('data')) {
         .strict()
         .parse(req.body);
       const { course, question: q, key } = lookup(body.courseId, body.questionId);
+      if (body.mode === 'ai' && resolveQuestionContext(course, q).warnings.length)
+        return void res.status(422).json({
+          error:
+            'この問題の前提となる参照先を確認できません。教材の前提を補ってから採点してください。回答の誤りとしては扱いません。',
+          code: 'missing_context',
+        });
       store.saveDraft(key, body.answer);
       let grade: Grade;
       if (body.mode === 'self') {

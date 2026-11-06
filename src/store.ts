@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { courseSchema, type Course, type Grade } from './schema.js';
 import type { UsageLog, UsageEvent, QuotaSnapshot } from './usage.js';
+import type { TutorSession } from './tutor.js';
 export function courseHash(c: Course) {
   return createHash('sha256').update(JSON.stringify(c)).digest('hex');
 }
@@ -42,6 +43,9 @@ export class Store {
     this.db.exec(
       'CREATE TABLE IF NOT EXISTS api_usage (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY,payload TEXT NOT NULL);',
     );
+    this.db.exec(
+      'CREATE TABLE IF NOT EXISTS tutor_sessions (id TEXT PRIMARY KEY,payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS generation_jobs (id TEXT PRIMARY KEY,payload TEXT NOT NULL);',
+    );
   }
   saveAttempt(a: Omit<Attempt, 'id' | 'createdAt'>): Attempt {
     const attempt = { ...a, id: randomUUID(), createdAt: new Date().toISOString() };
@@ -75,7 +79,14 @@ export class Store {
   close() {
     this.db.close();
   }
-  startUsage(model: string, context?: { courseId: string; questionId: string }) {
+  startUsage(
+    model: string,
+    context?: {
+      courseId: string;
+      questionId?: string;
+      purpose?: 'grading' | 'tutoring' | 'authoring';
+    },
+  ) {
     const record: UsageLog = {
       id: randomUUID(),
       createdAt: new Date().toISOString(),
@@ -121,5 +132,50 @@ export class Store {
         "INSERT INTO metadata VALUES ('quota',?) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload",
       )
       .run(JSON.stringify(value));
+  }
+  saveTutor(session: TutorSession) {
+    this.db
+      .prepare(
+        'INSERT INTO tutor_sessions VALUES (?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload',
+      )
+      .run(session.id, JSON.stringify(session));
+  }
+  tutor(id: string): TutorSession | undefined {
+    const row = this.db.prepare('SELECT payload FROM tutor_sessions WHERE id=?').get(id) as
+      { payload: string } | undefined;
+    return row ? (JSON.parse(row.payload) as TutorSession) : undefined;
+  }
+  tutors(courseId: string, questionId: string): TutorSession[] {
+    return (
+      this.db.prepare('SELECT payload FROM tutor_sessions ORDER BY rowid DESC').all() as {
+        payload: string;
+      }[]
+    )
+      .map((x) => JSON.parse(x.payload) as TutorSession)
+      .filter((x) => x.courseId === courseId && x.questionId === questionId);
+  }
+  attempt(id: string): Attempt | undefined {
+    const row = this.db.prepare('SELECT payload FROM attempts WHERE id=?').get(id) as
+      { payload: string } | undefined;
+    return row ? (JSON.parse(row.payload) as Attempt) : undefined;
+  }
+  saveGeneration(job: { id: string }) {
+    this.db
+      .prepare(
+        'INSERT INTO generation_jobs VALUES (?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload',
+      )
+      .run(job.id, JSON.stringify(job));
+  }
+  generation<T>(id: string): T | undefined {
+    const row = this.db.prepare('SELECT payload FROM generation_jobs WHERE id=?').get(id) as
+      { payload: string } | undefined;
+    return row ? (JSON.parse(row.payload) as T) : undefined;
+  }
+  generations<T>(): T[] {
+    return (
+      this.db.prepare('SELECT payload FROM generation_jobs ORDER BY rowid DESC').all() as {
+        payload: string;
+      }[]
+    ).map((x) => JSON.parse(x.payload) as T);
   }
 }

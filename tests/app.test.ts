@@ -14,6 +14,7 @@ import {
 } from '../src/grading.js';
 import { extractMaterial } from '../src/materials.js';
 import { Store } from '../src/store.js';
+import { memoryCredentialVault } from '../src/credentials.js';
 import { usageSummary, tokyoDate, limitHeaders, type UsageEvent } from '../src/usage.js';
 const sample = courseSchema.parse(JSON.parse(readFileSync('examples/sample-course.json', 'utf8')));
 test('教材パッケージは配点と参照先を検証する', () => {
@@ -312,7 +313,7 @@ test('回答→採点→履歴、下書き、教材追加、秘密情報の保�
   const dir = mkdtempSync(resolve('work/tests/session-'));
   mkdirSync(join(dir, 'courses'));
   writeFileSync(join(dir, 'courses/sample.json'), JSON.stringify(sample));
-  const { app, store } = createApp(dir),
+  const { app, store } = createApp(dir, { credentialVault: memoryCredentialVault() }),
     server = app.listen(0, '127.0.0.1');
   await once(server, 'listening');
   const address = server.address();
@@ -325,7 +326,7 @@ test('回答→採点→履歴、下書き、教材追加、秘密情報の保�
       aiConfigured: boolean;
     };
     assert.equal(state.aiConfigured, false);
-    assert.equal((state as typeof state & { appVersion: string }).appVersion, '2026.11.06.1');
+    assert.equal((state as typeof state & { appVersion: string }).appVersion, '2026.11.06.2');
     const promptResponse = await request('/material-prompt');
     assert.equal(promptResponse.status, 200);
     const { prompt } = await promptResponse.json();
